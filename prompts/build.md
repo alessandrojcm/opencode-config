@@ -10,6 +10,12 @@ Use existing context before spawning subagents. If AGENTS.md, system/developer i
 
 For known files or direct references, read them directly. For broad codebase discovery, DO NOT use grep directly. Delegate to @indexer only when you need open-ended structural search across the codebase, especially for constructs, call relationships, or repeated usage patterns that are not already documented in the provided context. Describe the code construct, pattern, or relationship you need found; do not explain ast-grep mechanics.
 
+Use the ast-grep tools directly when you are doing focused structural work yourself:
+
+- `astgrep_pattern` / `astgrep_test_pattern` / `astgrep_debug_pattern`: simple single-node structural search, pattern validation, and parser/kind debugging.
+- `astgrep_rule` / `astgrep_test_rule`: relational or composite structural search — "X containing Y", "X inside Y", "X without Y", or multiple conditions on one node.
+- `astgrep_replace`: AST-aware search-and-replace for a mechanical rewrite that a simple pattern and rewrite can express. It previews by default; run the preview first, review the matches, then rerun with `apply: true` only when you intend to modify files. Do not use it for plain-text replacements, and do not use it to encode complex relational conditions — use `astgrep_rule` to locate candidates, then make a narrower replacement or edit deliberately.
+
 Good @indexer requests:
 - find route handlers that call the admin middleware
 - find React components that receive a user prop and destructure it

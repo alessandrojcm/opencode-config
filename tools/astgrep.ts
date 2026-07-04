@@ -210,6 +210,104 @@ ast-grep parses the query.`,
   },
 });
 
+// ---- astgrep_replace: structural search and replace via `run --rewrite` ----
+export const replace = tool({
+  description: `Structural search and replace using ast-grep's simple pattern rewrite mode.
+
+Use this when you want to rewrite code by AST shape, not by plain text. It runs
+
+  ast-grep run --pattern <pattern> --rewrite <replacement> --lang <lang>
+
+By default this tool is a preview/dry run: it reports the matches ast-grep would
+rewrite but does not modify files. Set \`apply: true\` to pass \`--update-all\`
+and apply every rewrite non-interactively. This tool intentionally never uses
+\`--interactive\`, because API tool calls cannot answer prompts.
+
+Metavariables from the pattern are available in the replacement:
+  pattern:  $OBJ.$METHOD($$$ARGS)
+  rewrite:  $METHOD.call($OBJ, $$$ARGS)
+
+Examples:
+  pattern:  console.log($$$ARGS)
+  rewrite:  logger.debug($$$ARGS)
+
+  pattern:  $A && $A()
+  rewrite:  $A?.()
+
+When to use this tool:
+- You need a mechanical AST-aware replacement across a file or directory.
+- A simple single-node pattern can express the match.
+
+When NOT to use it:
+- Complex relational conditions are required; first use \`astgrep_rule\` to find
+  candidates, then apply narrower replacements deliberately.
+- You have not previewed or otherwise verified the rewrite. Prefer the default
+  preview first, then rerun with \`apply: true\` after reviewing matches.
+
+Notes:
+- The replacement is ast-grep rewrite syntax, not a JavaScript template string.
+- \`apply: true\` updates files in place with ast-grep's \`--update-all\` flag.
+- Defaults to the session's worktree when \`path\` is omitted.`,
+  args: {
+    pattern: z
+      .string()
+      .describe(
+        "ast-grep pattern to search for, e.g. 'console.log($$$ARGS)' or '$A && $A()'.",
+      ),
+    rewrite: z
+      .string()
+      .describe(
+        "Replacement using ast-grep metavariables from the pattern, e.g. 'logger.debug($$$ARGS)' or '$A?.()'.",
+      ),
+    lang: langSchema.describe(
+      "Tree-sitter language to parse as. Always pass this.",
+    ),
+    path: z
+      .string()
+      .optional()
+      .describe(
+        "File or directory to rewrite. Defaults to the session's project directory (worktree).",
+      ),
+    apply: z
+      .boolean()
+      .optional()
+      .describe(
+        "When true, pass --update-all and modify files in place. Defaults to false for preview/dry-run.",
+      ),
+  },
+  async execute(args, context) {
+    const target =
+      args.path && args.path.length > 0 ? args.path : context.worktree;
+    const cliArgs = [
+      "run",
+      "--pattern",
+      args.pattern,
+      "--rewrite",
+      args.rewrite,
+      "--lang",
+      args.lang,
+      "--json=compact",
+    ];
+    if (args.apply === true) {
+      cliArgs.push("--update-all");
+    }
+    cliArgs.push(target);
+    const out = await runAstGrep(cliArgs, context.directory, context.abort);
+    const mode = args.apply === true ? "apply" : "preview";
+    return {
+      title: `ast-grep replace · ${args.lang} · ${mode}`,
+      output: out,
+      metadata: {
+        pattern: args.pattern,
+        rewrite: args.rewrite,
+        lang: args.lang,
+        path: target,
+        apply: args.apply === true,
+      },
+    };
+  },
+});
+
 // ---- astgrep_debug_pattern: inspect how ast-grep parses a query pattern ----
 export const debug_pattern = tool({
   description: `Debug how ast-grep parses a query pattern.
