@@ -77,6 +77,28 @@ const debugFormatSchema = z.enum(["pattern", "ast", "cst", "sexp"]);
 
 const astGrepExe = "ast-grep";
 
+export const EMPTY_PATTERN_RESULT_HINT =
+  "Hint: No structural matches. If this miss was unexpected, do not switch to grep. " +
+  "Call astgrep_test_pattern with a tiny positive snippet; if that misses, call " +
+  "astgrep_debug_pattern with format cst, then retry once with a broader whole-node pattern.";
+
+export const EMPTY_RULE_RESULT_HINT =
+  "Hint: No structural matches. If this miss was unexpected, do not switch to grep. " +
+  "Call astgrep_test_rule with a tiny positive snippet; if that misses or the target kind " +
+  "is uncertain, call astgrep_debug_pattern with format cst, simplify the rule, and retry once.";
+
+export const EMPTY_PATTERN_TEST_RESULT_HINT =
+  "Hint: The pattern did not match its positive snippet. Call astgrep_debug_pattern with " +
+  "format cst, correct the whole-node pattern, and retest it before searching the repository.";
+
+export const EMPTY_RULE_TEST_RESULT_HINT =
+  "Hint: The rule did not match its positive snippet. Debug the target construct with " +
+  "astgrep_debug_pattern using format cst, simplify the rule, and retest it before searching the repository.";
+
+export function withEmptyResultHint(output: string, hint: string): string {
+  return output === "[]" ? `${output}\n\n${hint}` : output;
+}
+
 async function runAstGrep(
   args: string[],
   cwd: string,
@@ -204,7 +226,7 @@ ast-grep parses the query.`,
     );
     return {
       title: `ast-grep pattern · ${args.lang}`,
-      output: out,
+      output: withEmptyResultHint(out, EMPTY_PATTERN_RESULT_HINT),
       metadata: { pattern: args.pattern, lang: args.lang, path: target },
     };
   },
@@ -400,7 +422,7 @@ use \`astgrep_pattern\` after the pattern matches the snippet.`,
     );
     return {
       title: `ast-grep test pattern · ${args.lang}`,
-      output: out,
+      output: withEmptyResultHint(out, EMPTY_PATTERN_TEST_RESULT_HINT),
       metadata: { pattern: args.pattern, lang: args.lang },
     };
   },
@@ -486,7 +508,7 @@ query with \`astgrep_debug_pattern\`. It is not a codebase search; use
     );
     return {
       title: `ast-grep test rule · ${args.lang}`,
-      output: out,
+      output: withEmptyResultHint(out, EMPTY_RULE_TEST_RESULT_HINT),
       metadata: { rule: fullRule, lang: args.lang },
     };
   },
@@ -529,7 +551,7 @@ unclear, inspect a representative query with \`astgrep_debug_pattern\`.`,
     );
     return {
       title: `ast-grep rule · ${args.lang}`,
-      output: out,
+      output: withEmptyResultHint(out, EMPTY_RULE_RESULT_HINT),
       metadata: { rule: fullRule, lang: args.lang, path: target },
     };
   },
