@@ -1,13 +1,11 @@
-import { tool } from "@opencode-ai/plugin";
+import { Plugin } from "@opencode-ai/plugin/effect";
+import { Effect, Schema } from "effect";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { z } from "zod";
 
 // Language aliases ast-grep's built-in tree-sitter grammars support.
 // Source: https://ast-grep.github.io/reference/languages.html
-// Multiple aliases map to the same grammar; we expose the idiomatic one per
-// language plus common alternates so the model can use whichever it remembers.
 const LANGS = [
   "bash",
   "c",
@@ -72,9 +70,6 @@ const EXT_BY_LANG: Record<Lang, string> = {
   yaml: ".yaml",
 };
 
-const langSchema = z.enum(LANGS);
-const debugFormatSchema = z.enum(["pattern", "ast", "cst", "sexp"]);
-
 const astGrepExe = "ast-grep";
 
 export const EMPTY_PATTERN_RESULT_HINT =
@@ -102,16 +97,14 @@ export function withEmptyResultHint(output: string, hint: string): string {
 async function runAstGrep(
   args: string[],
   cwd: string,
-  abort: AbortSignal | undefined,
+  signal: AbortSignal,
 ): Promise<string> {
-  // Bun.$ exposes no .abort() builder method in current releases, so use
-  // Bun.spawn directly to get real AbortSignal support and explicit stdout/stderr.
   const proc = Bun.spawn({
     cmd: [astGrepExe, ...args],
     cwd,
     stdout: "pipe",
     stderr: "pipe",
-    signal: abort,
+    signal,
   });
   const [exitCode, stdout, stderr] = await Promise.all([
     proc.exited,
@@ -120,17 +113,25 @@ async function runAstGrep(
   ]);
   const out = stdout.trim();
   const err = stderr.trim();
-  // ast-grep exits 0 even on pattern parse errors, putting warnings on stderr.
-  // If there were no matches AND there's a stderr warning, surface it so the
-  // model can self-correct instead of getting a silent empty result.
-  if (out === "[]" && err) {
-    return `[]\n\nast-grep warning:\n${err}`;
-  }
+
+  // ast-grep exits 0 for pattern parse errors and puts warnings on stderr.
+  if (out === "[]" && err) return `[]\n\nast-grep warning:\n${err}`;
   if (exitCode !== 0 && !out) {
     return `ast-grep exited ${exitCode}${err ? `\n${err}` : ""}`;
   }
   return out || err || "(no output)";
 }
+
+const runAstGrepEffect = Effect.fn("astgrep.runAstGrep")(function* (
+  args: string[],
+  cwd: string,
+) {
+  return yield* Effect.tryPromise({
+    try: (signal) => runAstGrep(args, cwd, signal),
+    catch: (cause) =>
+      `ast-grep failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+  }).pipe(Effect.catch((message) => Effect.succeed(message)));
+});
 
 function fullRuleFor(lang: Lang, ruleBody: string): string {
   return `id: opencode-indexer
@@ -139,422 +140,259 @@ rule:
   ${ruleBody.replace(/\n/g, "\n  ")}`;
 }
 
-async function runAstGrepOnSnippet(
+const runAstGrepOnSnippet = Effect.fn("astgrep.runAstGrepOnSnippet")(function* (
   argsBeforePath: string[],
   lang: Lang,
   code: string,
   cwd: string,
-  abort: AbortSignal | undefined,
-): Promise<string> {
-  const tempDir = await mkdtemp(join(tmpdir(), "opencode-astgrep-"));
-  const tempFile = join(tempDir, `snippet${EXT_BY_LANG[lang]}`);
-  await writeFile(tempFile, code);
-  try {
-    return await runAstGrep([...argsBeforePath, tempFile], cwd, abort);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-}
-
-// ---- astgrep_pattern: simple single-node search via `run --pattern` ----
-export const pattern = tool({
-  description: `Structural code search using ast-grep's simple pattern mode.
-
-Use this for matching a single AST node by structural shape. Pass the code
-shape as \`pattern\`, using ast-grep metavariables:
-  $NAME    — match a single node (identifier, literal, etc.) and capture it
-  $$$ARGS — match zero or more nodes (e.g. function arguments, body statements)
-
-IMPORTANT: a pattern must structurally match the WHOLE node, including braces.
-"function $NAME($$$)" matches NOTHING because it has no body — use one of:
-  function $NAME                         — any function declaration (no body capture)
-  function $NAME($$$) { $$$ }            — any function declaration with body
-
-Examples of patterns that work:
-  function $NAME                          — any function declaration
-  function $NAME($$$) { $$$ }             — any function declaration with body
-  app.get($ROUTE, $$$)                    — express GET routes
-  console.log($$$)                        — any console.log call
-  class $NAME                              — any class declaration
-  $OBJ.$METHOD($$$)                        — any method call on an object
-
-Always pass \`--json\` automatically (this tool does it for you) so you get
-file, line range, and matched text back.
-
-When to use this tool:
-- You need to find occurrences of a code SHAPE, not text.
-- Single-node matches (no need to express "X that contains Y").
-
-For relational queries ("function that contains an await", "route handler that
-calls adminMiddleware"), use the \`astgrep_rule\` tool instead, which supports
-YAML rules with inside/has/not.
-
-If a pattern misses unexpectedly, do not shell out. Use \`astgrep_test_pattern\`
-on a tiny representative snippet and \`astgrep_debug_pattern\` to inspect how
-ast-grep parses the query.`,
-  args: {
-    pattern: z
-      .string()
-      .describe(
-        "ast-grep pattern, e.g. 'app.get($ROUTE, $$$)' or 'class $NAME'. $VAR captures one node, $$$ captures zero+ nodes.",
-      ),
-    lang: langSchema.describe(
-      "Tree-sitter language to parse as. Always pass this.",
-    ),
-    path: z
-      .string()
-      .optional()
-      .describe(
-        "File or directory to search. Defaults to the session's project directory (worktree).",
-      ),
-  },
-  async execute(args, context) {
-    const target =
-      args.path && args.path.length > 0 ? args.path : context.worktree;
-    const out = await runAstGrep(
-      [
-        "run",
-        "--pattern",
-        args.pattern,
-        "--lang",
-        args.lang,
-        "--json=compact",
-        target,
-      ],
-      context.directory,
-      context.abort,
-    );
-    return {
-      title: `ast-grep pattern · ${args.lang}`,
-      output: withEmptyResultHint(out, EMPTY_PATTERN_RESULT_HINT),
-      metadata: { pattern: args.pattern, lang: args.lang, path: target },
-    };
-  },
+) {
+  return yield* Effect.tryPromise({
+    try: async (signal) => {
+      const tempDir = await mkdtemp(join(tmpdir(), "opencode-astgrep-"));
+      const tempFile = join(tempDir, `snippet${EXT_BY_LANG[lang]}`);
+      await writeFile(tempFile, code);
+      try {
+        return await runAstGrep([...argsBeforePath, tempFile], cwd, signal);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    },
+    catch: (cause) =>
+      `ast-grep failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+  }).pipe(Effect.catch((message) => Effect.succeed(message)));
 });
 
-// ---- astgrep_replace: structural search and replace via `run --rewrite` ----
-export const replace = tool({
-  description: `Structural search and replace using ast-grep's simple pattern rewrite mode.
-
-Use this when you want to rewrite code by AST shape, not by plain text. It runs
-
-  ast-grep run --pattern <pattern> --rewrite <replacement> --lang <lang>
-
-By default this tool is a preview/dry run: it reports the matches ast-grep would
-rewrite but does not modify files. Set \`apply: true\` to pass \`--update-all\`
-and apply every rewrite non-interactively. This tool intentionally never uses
-\`--interactive\`, because API tool calls cannot answer prompts.
-
-Metavariables from the pattern are available in the replacement:
-  pattern:  $OBJ.$METHOD($$$ARGS)
-  rewrite:  $METHOD.call($OBJ, $$$ARGS)
-
-Examples:
-  pattern:  console.log($$$ARGS)
-  rewrite:  logger.debug($$$ARGS)
-
-  pattern:  $A && $A()
-  rewrite:  $A?.()
-
-When to use this tool:
-- You need a mechanical AST-aware replacement across a file or directory.
-- A simple single-node pattern can express the match.
-
-When NOT to use it:
-- Complex relational conditions are required; first use \`astgrep_rule\` to find
-  candidates, then apply narrower replacements deliberately.
-- You have not previewed or otherwise verified the rewrite. Prefer the default
-  preview first, then rerun with \`apply: true\` after reviewing matches.
-
-Notes:
-- The replacement is ast-grep rewrite syntax, not a JavaScript template string.
-- \`apply: true\` updates files in place with ast-grep's \`--update-all\` flag.
-- Defaults to the session's worktree when \`path\` is omitted.`,
-  args: {
-    pattern: z
-      .string()
-      .describe(
-        "ast-grep pattern to search for, e.g. 'console.log($$$ARGS)' or '$A && $A()'.",
-      ),
-    rewrite: z
-      .string()
-      .describe(
-        "Replacement using ast-grep metavariables from the pattern, e.g. 'logger.debug($$$ARGS)' or '$A?.()'.",
-      ),
-    lang: langSchema.describe(
-      "Tree-sitter language to parse as. Always pass this.",
-    ),
-    path: z
-      .string()
-      .optional()
-      .describe(
-        "File or directory to rewrite. Defaults to the session's project directory (worktree).",
-      ),
-    apply: z
-      .boolean()
-      .optional()
-      .describe(
-        "When true, pass --update-all and modify files in place. Defaults to false for preview/dry-run.",
-      ),
-  },
-  async execute(args, context) {
-    const target =
-      args.path && args.path.length > 0 ? args.path : context.worktree;
-    const cliArgs = [
-      "run",
-      "--pattern",
-      args.pattern,
-      "--rewrite",
-      args.rewrite,
-      "--lang",
-      args.lang,
-      "--json=compact",
-    ];
-    if (args.apply === true) {
-      cliArgs.push("--update-all");
-    }
-    cliArgs.push(target);
-    const out = await runAstGrep(cliArgs, context.directory, context.abort);
-    const mode = args.apply === true ? "apply" : "preview";
-    return {
-      title: `ast-grep replace · ${args.lang} · ${mode}`,
-      output: out,
-      metadata: {
-        pattern: args.pattern,
-        rewrite: args.rewrite,
-        lang: args.lang,
-        path: target,
-        apply: args.apply === true,
-      },
-    };
-  },
+const LangSchema = Schema.Literals(LANGS).annotate({
+  description: "Tree-sitter language to parse as. Always pass this.",
 });
 
-// ---- astgrep_debug_pattern: inspect how ast-grep parses a query pattern ----
-export const debug_pattern = tool({
-  description: `Debug how ast-grep parses a query pattern.
-
-Use this when a structural search misses unexpectedly, when you need a tree-sitter
-kind name for a representative code shape, or when an incomplete/ambiguous snippet
-needs a pattern-object context/selector. This runs ast-grep's \`--debug-query\`
-mode; it does not search the codebase and it does not require shell quoting.
-
-Prefer \`format: "cst"\` when discovering exact node kinds, \`format: "ast"\` for
-named AST nodes, and \`format: "pattern"\` to inspect metavariable parsing.`,
-  args: {
-    pattern: z
-      .string()
-      .describe(
-        "Representative ast-grep pattern/snippet to parse, e.g. 'class A { $FIELD = $INIT }'.",
-      ),
-    lang: langSchema.describe(
-      "Tree-sitter language to parse as. Always pass this.",
-    ),
-    format: debugFormatSchema
-      .optional()
-      .describe(
-        "Debug output format. Defaults to 'cst'. Use 'cst' for exact kind names, 'ast' for named nodes, 'pattern' for metavariables, or 'sexp'.",
-      ),
-    selector: z
-      .string()
-      .optional()
-      .describe(
-        "Optional node kind to select from the parsed pattern, useful before turning a context snippet into a rule pattern object.",
-      ),
-  },
-  async execute(args, context) {
-    const format = args.format ?? "cst";
-    const cliArgs = [
-      "run",
-      "--pattern",
-      args.pattern,
-      "--lang",
-      args.lang,
-      `--debug-query=${format}`,
-    ];
-    if (args.selector) {
-      cliArgs.push("--selector", args.selector);
-    }
-    const out = await runAstGrep(cliArgs, context.directory, context.abort);
-    return {
-      title: `ast-grep debug pattern · ${args.lang} · ${format}`,
-      output: out,
-      metadata: {
-        pattern: args.pattern,
-        lang: args.lang,
-        format,
-        selector: args.selector,
-      },
-    };
-  },
+const PathSchema = Schema.optional(Schema.String).annotate({
+  description: "File or directory to search. Defaults to the current session directory.",
 });
 
-// ---- astgrep_test_pattern: trial a simple pattern against example code ----
-export const test_pattern = tool({
-  description: `Test a simple ast-grep pattern against a tiny representative code snippet.
-
-Use this before searching the whole codebase when you are developing or debugging
-a non-trivial pattern. It writes the snippet to a temporary file, runs ast-grep
-with \`--json=compact\`, and returns the match JSON. It is not a codebase search;
-use \`astgrep_pattern\` after the pattern matches the snippet.`,
-  args: {
-    pattern: z
-      .string()
-      .describe(
-        "ast-grep pattern to test, e.g. 'console.log($$$)' or 'function $NAME($$$) { $$$ }'.",
-      ),
-    lang: langSchema.describe(
-      "Tree-sitter language to parse as. Always pass this.",
-    ),
-    code: z
-      .string()
-      .describe(
-        "Small positive example code snippet that should match the pattern.",
-      ),
-  },
-  async execute(args, context) {
-    const out = await runAstGrepOnSnippet(
-      ["run", "--pattern", args.pattern, "--lang", args.lang, "--json=compact"],
-      args.lang,
-      args.code,
-      context.directory,
-      context.abort,
-    );
-    return {
-      title: `ast-grep test pattern · ${args.lang}`,
-      output: withEmptyResultHint(out, EMPTY_PATTERN_TEST_RESULT_HINT),
-      metadata: { pattern: args.pattern, lang: args.lang },
-    };
-  },
+const PatternInput = Schema.Struct({
+  pattern: Schema.String.annotate({
+    description:
+      "ast-grep pattern, e.g. 'app.get($ROUTE, $$$)' or 'class $NAME'. $VAR captures one node and $$$ captures zero or more nodes.",
+  }),
+  lang: LangSchema,
+  path: PathSchema,
 });
 
-// ---- astgrep_rule: relational/composite search via `scan --inline-rules` ----
-const ruleSchema = z.string()
-  .describe(`YAML rule body (everything under \`rule:\`). This tool wraps it in
-{id, language, rule: <your yaml>} and runs \`ast-grep scan --inline-rules\`.
-
-Translate the parent agent's natural-language request:
-  "X that calls/contains Y"  ->  pattern: X
-                                   has:    { pattern: Y, stopBy: end }
-  "X inside Y"                ->  pattern: X
-                                   inside: { kind: <Y node kind>, stopBy: end }
-  "X without Y"               ->  pattern: X
-                                   not:    { has: { pattern: Y, stopBy: end } }
-
-ALWAYS add \`stopBy: end\` on every relational rule (inside/has/precedes/follows).
-Without it ast-grep stops at the first non-matching child and silently misses matches.
-
-Use \`kind:\` to match a node type instead of a literal shape. Find kind names by
-calling \`astgrep_debug_pattern\` with \`format: "cst"\` on a representative snippet —
-do not shell out. Prefer pattern-based rules when possible.
-
-If a direct pattern is incomplete or ambiguous, use a pattern object with context
-and selector, for example:
-  pattern:
-    context: class A { $FIELD = $INIT }
-    selector: field_definition
-
-Composite operators: \`all:\`, \`any:\`, \`not:\` accept lists of sub-rules.
-
-Example rule body (note: NO leading "rule:" — start at the rule's children):
-  pattern: app.get($$$)
-  has:
-    pattern: adminMiddleware
-    stopBy: end
-
-Another example (async functions with no try/catch):
-  all:
-    - kind: function_declaration
-    - has:
-        pattern: await $EXPR
-        stopBy: end
-    - not:
-        has:
-          pattern: try { $$$ } catch ($E) { $$$ }
-          stopBy: end
-
-Keep rules as simple as possible. If you get no matches, simplify: drop a sub-clause,
-test the simplified rule with \`astgrep_test_rule\`, or switch the outer \`pattern:\`
-to a \`kind:\` you've confirmed with \`astgrep_debug_pattern\`.`);
-
-// ---- astgrep_test_rule: trial a YAML rule against example code ----
-export const test_rule = tool({
-  description: `Test a relational/composite ast-grep YAML rule against a tiny representative code snippet.
-
-Use this while developing complex rules: first break the query into sub-rules,
-combine them, then verify the rule against a positive example before searching
-the real codebase. If it returns no matches, simplify the rule or inspect the
-query with \`astgrep_debug_pattern\`. It is not a codebase search; use
-\`astgrep_rule\` after the rule matches the snippet.`,
-  args: {
-    rule: ruleSchema,
-    lang: langSchema.describe(
-      "Tree-sitter language to parse as. Always pass this.",
-    ),
-    code: z
-      .string()
-      .describe(
-        "Small positive example code snippet that should match the YAML rule body.",
-      ),
-  },
-  async execute(args, context) {
-    const fullRule = fullRuleFor(args.lang, args.rule);
-    const out = await runAstGrepOnSnippet(
-      ["scan", "--inline-rules", fullRule, "--json=compact"],
-      args.lang,
-      args.code,
-      context.directory,
-      context.abort,
-    );
-    return {
-      title: `ast-grep test rule · ${args.lang}`,
-      output: withEmptyResultHint(out, EMPTY_RULE_TEST_RESULT_HINT),
-      metadata: { rule: fullRule, lang: args.lang },
-    };
-  },
+const ReplaceInput = Schema.Struct({
+  pattern: Schema.String.annotate({
+    description: "ast-grep pattern to search for, e.g. 'console.log($$$ARGS)'.",
+  }),
+  rewrite: Schema.String.annotate({
+    description: "Replacement using metavariables captured by the pattern, e.g. 'logger.debug($$$ARGS)'.",
+  }),
+  lang: LangSchema,
+  path: PathSchema,
+  apply: Schema.optional(Schema.Boolean).annotate({
+    description: "When true, pass --update-all and modify files in place. Defaults to false for preview/dry-run.",
+  }),
 });
 
-export const rule = tool({
-  description: `Structural code search using ast-grep's YAML rule mode (relational/composite).
-
-Use this when the query needs "inside", "has", "not", "all", "any", or multiple
-conditions on the same node — anything a single pattern can't express.
-
-You supply only the rule BODY (the contents of \`rule:\`); this tool wraps it and
-runs \`ast-grep scan --inline-rules\` with \`--json=compact\` output. You never have
-to shell-escape \`$\` metavariables — pass them through verbatim in the YAML string.
-
-Always add \`stopBy: end\` on relational sub-rules. See the \`rule\` arg description
-for the translation recipes and worked examples. For complex rules, first validate
-against a tiny positive snippet with \`astgrep_test_rule\`; if parsing or kinds are
-unclear, inspect a representative query with \`astgrep_debug_pattern\`.`,
-  args: {
-    rule: ruleSchema,
-    lang: langSchema.describe(
-      "Tree-sitter language to parse as. Always pass this.",
-    ),
-    path: z
-      .string()
-      .optional()
-      .describe(
-        "File or directory to search. Defaults to the session's project directory (worktree).",
-      ),
-  },
-  async execute(args, context) {
-    const target =
-      args.path && args.path.length > 0 ? args.path : context.worktree;
-    const fullRule = fullRuleFor(args.lang, args.rule);
-    const out = await runAstGrep(
-      ["scan", "--inline-rules", fullRule, "--json=compact", target],
-      context.directory,
-      context.abort,
-    );
-    return {
-      title: `ast-grep rule · ${args.lang}`,
-      output: withEmptyResultHint(out, EMPTY_RULE_RESULT_HINT),
-      metadata: { rule: fullRule, lang: args.lang, path: target },
-    };
-  },
+const DebugPatternInput = Schema.Struct({
+  pattern: Schema.String.annotate({
+    description: "Representative ast-grep pattern/snippet to parse, e.g. 'class A { $FIELD = $INIT }'.",
+  }),
+  lang: LangSchema,
+  format: Schema.optional(Schema.Literals(["pattern", "ast", "cst", "sexp"])).annotate({
+    description: "Debug output format. Defaults to cst; use cst for exact node kinds and ast for named nodes.",
+  }),
+  selector: Schema.optional(Schema.String).annotate({
+    description: "Optional node kind to select from the parsed pattern.",
+  }),
 });
 
-export default pattern;
+const TestPatternInput = Schema.Struct({
+  pattern: Schema.String.annotate({ description: "ast-grep pattern to test." }),
+  lang: LangSchema,
+  code: Schema.String.annotate({
+    description: "Small positive example code snippet that should match the pattern.",
+  }),
+});
+
+const RuleSchema = Schema.String.annotate({
+  description: `YAML rule body (everything under rule:). This tool wraps it in {id, language, rule: <your yaml>}.
+
+Translate relational requests with has, inside, not, all, or any. ALWAYS add stopBy: end on every relational rule (inside/has/precedes/follows); otherwise ast-grep may stop at the first non-matching child.
+
+Use astgrep_debug_pattern with format cst to find node kind names. If a direct pattern is incomplete or ambiguous, use a pattern object with context and selector. Do not include a leading rule: key.`,
+});
+
+const RuleInput = Schema.Struct({
+  rule: RuleSchema,
+  lang: LangSchema,
+  path: PathSchema,
+});
+
+const TestRuleInput = Schema.Struct({
+  rule: RuleSchema,
+  lang: LangSchema,
+  code: Schema.String.annotate({
+    description: "Small positive example code snippet that should match the YAML rule body.",
+  }),
+});
+
+const patternDescription = `Structural code search using ast-grep's simple pattern mode.
+
+Use this for one AST node by structural shape. Metavariables: $NAME matches one node; $$$ARGS matches zero or more nodes. Patterns match a WHOLE node, including braces: use function $NAME or function $NAME($$$) { $$$ }, not an incomplete declaration.
+
+The result is compact JSON with file, line range, and matched text. For relational queries such as "function that contains await" or "route handler that calls adminMiddleware", use astgrep_rule. If this misses unexpectedly, use astgrep_test_pattern and astgrep_debug_pattern; do not shell out.`;
+
+const replaceDescription = `Structural AST-aware search and replace using ast-grep's pattern/rewrite mode.
+
+The default is a preview. Set apply: true only after reviewing the preview; it passes --update-all and edits files in place. Use simple single-node patterns only. For relational conditions, locate candidates with astgrep_rule and apply narrower edits deliberately.`;
+
+const debugDescription = `Debug how ast-grep parses a query pattern without searching the codebase. Use cst to discover exact tree-sitter kinds, ast for named nodes, and pattern to inspect metavariables. This is the recovery tool when an expected structural pattern misses.`;
+
+const testPatternDescription = `Test a simple ast-grep pattern against a representative code snippet before searching the repository. It writes the snippet to a temporary file and returns compact match JSON. Use astgrep_pattern after the pattern matches.`;
+
+const ruleDescription = `Structural code search using ast-grep YAML rule mode for relational or composite queries. Use inside, has, not, all, or any when a single pattern cannot express the query. Supply only the contents under rule:. Always add stopBy: end to relational sub-rules. Validate complex rules first with astgrep_test_rule.`;
+
+const testRuleDescription = `Test a relational or composite ast-grep YAML rule against a representative code snippet before searching the repository. If it does not match, simplify it or inspect a representative construct with astgrep_debug_pattern using cst.`;
+
+export default Plugin.define({
+  id: "astgrep",
+  effect: (ctx) =>
+    Effect.gen(function* () {
+      const sessionDirectory = ctx.location.directory;
+
+      yield* ctx.tool.transform((draft) => {
+        draft.add({
+          name: "astgrep_pattern",
+          description: patternDescription,
+          input: PatternInput,
+          options: { codemode: true },
+          execute: ({ pattern, lang, path }, tool) =>
+            Effect.gen(function* () {
+              const cwd = sessionDirectory;
+              const target = path && path.length > 0 ? path : cwd;
+              const output = yield* runAstGrepEffect(
+                ["run", "--pattern", pattern, "--lang", lang, "--json=compact", target],
+                cwd,
+              );
+              return {
+                content: withEmptyResultHint(output, EMPTY_PATTERN_RESULT_HINT),
+                metadata: { title: `ast-grep pattern · ${lang}`, pattern, lang, path: target },
+              };
+            }),
+        });
+
+        draft.add({
+          name: "astgrep_replace",
+          description: replaceDescription,
+          input: ReplaceInput,
+          options: { codemode: true },
+          execute: ({ pattern, rewrite, lang, path, apply }, tool) =>
+            Effect.gen(function* () {
+              const cwd = sessionDirectory;
+              const target = path && path.length > 0 ? path : cwd;
+              const args = [
+                "run",
+                "--pattern",
+                pattern,
+                "--rewrite",
+                rewrite,
+                "--lang",
+                lang,
+                "--json=compact",
+              ];
+              if (apply === true) args.push("--update-all");
+              args.push(target);
+              const output = yield* runAstGrepEffect(args, cwd);
+              const mode = apply === true ? "apply" : "preview";
+              return {
+                content: output,
+                metadata: { title: `ast-grep replace · ${lang} · ${mode}`, pattern, rewrite, lang, path: target, apply: apply === true },
+              };
+            }),
+        });
+
+        draft.add({
+          name: "astgrep_debug_pattern",
+          description: debugDescription,
+          input: DebugPatternInput,
+          options: { codemode: true },
+          execute: ({ pattern, lang, format, selector }, tool) =>
+            Effect.gen(function* () {
+              const cwd = sessionDirectory;
+              const resolvedFormat = format ?? "cst";
+              const args = ["run", "--pattern", pattern, "--lang", lang, `--debug-query=${resolvedFormat}`];
+              if (selector) args.push("--selector", selector);
+              const output = yield* runAstGrepEffect(args, cwd);
+              return {
+                content: output,
+                metadata: { title: `ast-grep debug pattern · ${lang} · ${resolvedFormat}`, pattern, lang, format: resolvedFormat, selector },
+              };
+            }),
+        });
+
+        draft.add({
+          name: "astgrep_test_pattern",
+          description: testPatternDescription,
+          input: TestPatternInput,
+          options: { codemode: true },
+          execute: ({ pattern, lang, code }, tool) =>
+            Effect.gen(function* () {
+              const cwd = sessionDirectory;
+              const output = yield* runAstGrepOnSnippet(
+                ["run", "--pattern", pattern, "--lang", lang, "--json=compact"],
+                lang,
+                code,
+                cwd,
+              );
+              return {
+                content: withEmptyResultHint(output, EMPTY_PATTERN_TEST_RESULT_HINT),
+                metadata: { title: `ast-grep test pattern · ${lang}`, pattern, lang },
+              };
+            }),
+        });
+
+        draft.add({
+          name: "astgrep_test_rule",
+          description: testRuleDescription,
+          input: TestRuleInput,
+          options: { codemode: true },
+          execute: ({ rule, lang, code }, tool) =>
+            Effect.gen(function* () {
+              const cwd = sessionDirectory;
+              const fullRule = fullRuleFor(lang, rule);
+              const output = yield* runAstGrepOnSnippet(
+                ["scan", "--inline-rules", fullRule, "--json=compact"],
+                lang,
+                code,
+                cwd,
+              );
+              return {
+                content: withEmptyResultHint(output, EMPTY_RULE_TEST_RESULT_HINT),
+                metadata: { title: `ast-grep test rule · ${lang}`, rule: fullRule, lang },
+              };
+            }),
+        });
+
+        draft.add({
+          name: "astgrep_rule",
+          description: ruleDescription,
+          input: RuleInput,
+          options: { codemode: true },
+          execute: ({ rule, lang, path }, tool) =>
+            Effect.gen(function* () {
+              const cwd = sessionDirectory;
+              const target = path && path.length > 0 ? path : cwd;
+              const fullRule = fullRuleFor(lang, rule);
+              const output = yield* runAstGrepEffect(
+                ["scan", "--inline-rules", fullRule, "--json=compact", target],
+                cwd,
+              );
+              return {
+                content: withEmptyResultHint(output, EMPTY_RULE_RESULT_HINT),
+                metadata: { title: `ast-grep rule · ${lang}`, rule: fullRule, lang, path: target },
+              };
+            }),
+        });
+      });
+    }),
+});

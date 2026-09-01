@@ -4,6 +4,8 @@
 // HERDR_INTEGRATION_ID=opencode
 // HERDR_INTEGRATION_VERSION=9
 
+import { Plugin } from "@opencode-ai/plugin/effect";
+import { Effect, Predicate, Stream } from "effect";
 import net from "node:net";
 
 const SOURCE = "herdr:opencode";
@@ -28,10 +30,23 @@ function nextReportSeq() {
   return reportSeq;
 }
 
-function sessionIDFromProperties(properties) {
-  return typeof properties?.sessionID === "string" && properties.sessionID
-    ? properties.sessionID
-    : undefined;
+function stringField(value, field) {
+  if (!Predicate.isRecord(value)) return undefined;
+  const candidate = value[field];
+  return Predicate.isString(candidate) && candidate ? candidate : undefined;
+}
+
+function recordField(value, field) {
+  if (!Predicate.isRecord(value)) return undefined;
+  const candidate = value[field];
+  return Predicate.isRecord(candidate) ? candidate : undefined;
+}
+
+function sessionIDFromEvent(event) {
+  const data = event.data;
+  return stringField(data, "sessionID") ??
+    stringField(data, "id") ??
+    stringField(recordField(data, "info"), "id");
 }
 
 const SESSION_STATE_BY_STATUS = new Map([
@@ -46,10 +61,8 @@ const SESSION_STATE_BY_STATUS = new Map([
 ]);
 
 function stateFromSessionStatus(status) {
-  const kind = typeof status === "string" ? status : status?.type;
-  return typeof kind === "string"
-    ? SESSION_STATE_BY_STATUS.get(kind.toLowerCase())
-    : undefined;
+  const kind = Predicate.isString(status) ? status : stringField(status, "type");
+  return kind ? SESSION_STATE_BY_STATUS.get(kind.toLowerCase()) : undefined;
 }
 
 function request(method, params) {
@@ -122,81 +135,74 @@ function reportState(state, sessionID) {
   return request("pane.report_agent", params);
 }
 
-export const HerdrAgentStatePlugin = async () => {
-  if (
-    process.env.HERDR_ENV !== "1" ||
-    !process.env.HERDR_SOCKET_PATH ||
-    !process.env.HERDR_PANE_ID
-  ) {
-    return {};
+const report = Effect.fn("herdr.report")(function* (operation) {
+  yield* Effect.tryPromise({
+    try: operation,
+    catch: () => undefined,
+  }).pipe(Effect.catch(() => Effect.void));
+});
+
+const handleEvent = Effect.fn("herdr.handleEvent")(function* (event) {
+  const type = event.type;
+  const data = event.data;
+  const sessionID = sessionIDFromEvent(event);
+  const info = recordField(data, "info");
+
+  if (stringField(info, "id") && stringField(info, "parentID")) {
+    childSessions.add(stringField(info, "id"));
+  }
+  if (sessionID && childSessions.has(sessionID)) {
+    const state = CHILD_EVENT_STATES.get(type);
+    if (state) yield* report(() => reportState(state));
+    return;
   }
 
-  return {
-    "chat.message": async ({ sessionID }) => {
-      if (sessionID && childSessions.has(sessionID)) {
-        return;
+  switch (type) {
+    case "session.created":
+      yield* report(() => reportSession(sessionID, "new"));
+      return;
+    case "session.updated":
+      if (sessionID && sessionID !== reportedRootSessionID) {
+        yield* report(() => reportSession(sessionID));
       }
-      await reportState("working", sessionID);
-    },
-    event: async ({ event }) => {
-      const type = event?.type;
-      const properties = event?.properties ?? {};
-      const sessionID = sessionIDFromProperties(properties);
+      return;
+    case "session.status": {
+      const state = stateFromSessionStatus(stringField(data, "status") ?? recordField(data, "status"));
+      yield* report(() => state ? reportState(state, sessionID) : reportSession(sessionID));
+      return;
+    }
+    case "tool.execute.before":
+    case "tool.execute.after":
+    case "permission.replied":
+    case "question.replied":
+    case "question.rejected":
+    case "session.compacted":
+      yield* report(() => reportState("working", sessionID));
+      return;
+    case "permission.asked":
+    case "question.asked":
+    case "session.error":
+      yield* report(() => reportState("blocked", sessionID));
+      return;
+    case "session.idle":
+      yield* report(() => reportState("idle", sessionID));
+      return;
+  }
+});
 
-      const info = properties.info;
-      if (info?.id && info.parentID) {
-        childSessions.add(info.id);
-      }
-      if (sessionID && childSessions.has(sessionID)) {
-        const state = CHILD_EVENT_STATES.get(type);
-        if (state) {
-          await reportState(state);
-        }
-        return;
-      }
+export default Plugin.define({
+  id: "herdr-agent-state",
+  effect: (ctx) =>
+    Effect.gen(function* () {
+      if (
+        process.env.HERDR_ENV !== "1" ||
+        !process.env.HERDR_SOCKET_PATH ||
+        !process.env.HERDR_PANE_ID
+      ) return;
 
-      switch (type) {
-        case "session.created":
-          // A root session.created is a genuine new-session start (subagent
-          // creates are dropped above). Signal it so herdr replaces the pane's
-          // prior session id instead of treating the change as cross-talk.
-          await reportSession(sessionID, "new");
-          break;
-        case "session.updated":
-          if (sessionID && sessionID !== reportedRootSessionID) {
-            await reportSession(sessionID);
-          }
-          break;
-        case "session.status": {
-          const state = stateFromSessionStatus(properties.status);
-          if (state) {
-            await reportState(state, sessionID);
-          } else {
-            await reportSession(sessionID);
-          }
-          break;
-        }
-        case "tool.execute.before":
-        case "tool.execute.after":
-        case "permission.replied":
-        case "question.replied":
-        case "question.rejected":
-        case "session.compacted":
-          await reportState("working", sessionID);
-          break;
-        case "permission.asked":
-        case "question.asked":
-        case "session.error":
-          await reportState("blocked", sessionID);
-          break;
-        case "session.idle":
-          await reportState("idle", sessionID);
-          break;
-        case "session.deleted":
-          break;
-        default:
-          break;
-      }
-    },
-  };
-};
+      yield* ctx.event.subscribe().pipe(
+        Stream.runForEach(handleEvent),
+        Effect.forkScoped,
+      );
+    }),
+});
