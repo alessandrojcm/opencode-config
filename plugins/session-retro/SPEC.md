@@ -259,6 +259,9 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
   guarantee immediate visible message content; this produced blank "Session retro"
   rows in the transcript. The CLI now invokes the RPC and renders its report with
   `ui.dialog.alert`, while `pending` and `settings` use the same direct UI path.
+- TUI `keymap.layer()` uses Solid hooks and must be called from a rendered owner.
+  The plugin mounts the global `/retro` layer through the `app` slot; calling it
+  directly from `setup()` leaves the command unreachable.
 
 ## Out of scope (v1)
 

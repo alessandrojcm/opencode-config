@@ -122,20 +122,30 @@ export default Plugin.define({
       await runRetro(sessionID);
     }
 
-    context.keymap.layer(() => ({
-      mode: "global",
-      commands: [
-        {
-          id: "session-retro.run",
-          title: "Run session retro",
-          description: "Analyze this session for friction (or use pending/settings).",
-          group: "Session retro",
-          palette: true,
-          slash: { name: "retro", arguments: true },
-          run: (input) => runCommand(input).catch(fail("Retro command")),
+    // Keymap layers are Solid-owned: register from a rendered slot rather than setup(),
+    // which runs outside a component owner and silently leaves the command unreachable.
+    cleanups.push(
+      context.ui.slot({
+        append: "app",
+        render: () => {
+          context.keymap.layer(() => ({
+            mode: "global",
+            commands: [
+              {
+                id: "session-retro.run",
+                title: "Run session retro",
+                description: "Analyze this session for friction (or use pending/settings).",
+                group: "Session retro",
+                palette: true,
+                slash: { name: "retro", arguments: true },
+                run: (input) => runCommand(input).catch(fail("Retro command")),
+              },
+            ],
+          }));
+          return null;
         },
-      ],
-    }));
+      }),
+    );
 
     async function act(id: string, due: DueEvent, choice: Choice) {
       const setPolicy = (policy: Policy) => rpc.policy({ projectDir: due.projectDir, policy });
