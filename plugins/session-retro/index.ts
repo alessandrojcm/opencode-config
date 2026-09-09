@@ -1,7 +1,7 @@
 import { Plugin } from "@opencode-ai/plugin/effect";
 import type { Session } from "@opencode-ai/schema/session";
 import { Cause, Effect, FiberMap, Schema, Stream } from "effect";
-import { buildPrompt, compressTranscript, parseAnalysis, RETRO_METADATA_KEY, type ContextMessage, type RuleHint } from "./analyze.ts";
+import { buildPrompt, compressTranscript, parseAnalysis, type ContextMessage, type RuleHint } from "./analyze.ts";
 import { openDb, type Db, type Outcome } from "./db.ts";
 import { POLICIES, SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
 import { detect, hashInput, summarizeInput } from "./rules.ts";
@@ -257,6 +257,30 @@ export default Plugin.define({
           return analyzeBody(sessionID, trigger).pipe(Effect.ensuring(Effect.sync(() => running.delete(sessionID))));
         });
 
+      const reportFor = (
+        result: { findings: number; summary: string; details?: ReadonlyArray<{ severity: string; turn: number; type: string; evidence: string; harness_fix: { target: string; suggestion: string } }> },
+        sessionID: string,
+      ) => {
+        const rules = db.ruleFrictionForSession(sessionID);
+        const lines = [
+          `Session retro (${result.findings} finding${result.findings === 1 ? "" : "s"}, ${rules.length} rule hit${rules.length === 1 ? "" : "s"})`,
+          "",
+          result.summary,
+        ];
+        if (result.details?.length) {
+          lines.push("", "Findings");
+          for (const f of result.details) {
+            lines.push(`• [${f.severity}] turn ${f.turn} ${f.type}: ${f.evidence}`);
+            if (f.harness_fix.target !== "none") lines.push(`  → ${f.harness_fix.target}: ${f.harness_fix.suggestion}`);
+          }
+        }
+        if (rules.length) {
+          lines.push("", "Rule hits");
+          for (const r of rules) lines.push(`• [${r.severity}] ${r.type}: ${r.evidence ?? ""}`);
+        }
+        return lines.join("\n");
+      };
+
       // ---------- idle timer ----------
 
       let emitDue: ((data: DueEvent) => Effect.Effect<void, unknown>) | undefined;
@@ -481,7 +505,7 @@ export default Plugin.define({
             const result = yield* analyze(sessionID, "manual").pipe(
               Effect.mapError((e) => call.error("analysis_failed", errorMessage(e), { message: errorMessage(e) })),
             );
-            return { runID: result.runID, findings: result.findings };
+            return { runID: result.runID, findings: result.findings, report: reportFor(result, sessionID) };
           }),
         skip: (input) =>
           Effect.gen(function* () {
@@ -504,57 +528,14 @@ export default Plugin.define({
             return {};
           }),
         pending: () => listPending.pipe(Effect.map((sessions) => ({ sessions }))),
+        settings: (input) =>
+          Effect.sync(() => {
+            const { sessionID } = input as { sessionID: string };
+            const projectDir = db.session(sessionID)?.project_dir ?? ctx.location.directory;
+            return { projectDir, policy: policyFor(projectDir), idleMinutes, dbPath };
+          }),
       }).pipe(Effect.orDie);
       emitDue = (data) => registration.events.emit("due", data);
-
-      // ---------- command ----------
-
-      yield* ctx.command.transform((draft) => {
-        draft.add({
-          name: "retro",
-          description: "Session retro: analyze this session for friction (or `pending` / `settings`).",
-          execute: ({ sessionID, prompt }) =>
-            Effect.gen(function* () {
-              const arg = (prompt.text ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-              // resume:false — record the summary without waking the model for another turn.
-              const post = (text: string) =>
-                ctx.session.synthetic({ sessionID: sid(sessionID), text, description: "Session retro", metadata: { [RETRO_METADATA_KEY]: true }, resume: false });
-
-              if (arg === "pending") {
-                const list = yield* listPending;
-                const body = list.length === 0 ? "No sessions with a pending retro." : list.map((p) => `- ${p.title} (${p.sessionID}) — ${p.turns} turns, ${p.projectDir}`).join("\n");
-                yield* post(`**Pending retros**\n${body}`);
-                return;
-              }
-              if (arg === "settings") {
-                const dir = db.session(sessionID)?.project_dir ?? ctx.location.directory;
-                yield* post(`**Session retro settings**\n- project: ${dir}\n- policy: ${policyFor(dir)}\n- idle minutes: ${idleMinutes}\n- db: ${dbPath}\n\nChange the policy from the retro dialog, or via the \`session-retro\` RPC \`policy\` method.`);
-                return;
-              }
-              yield* cancelIdleTimer(sessionID);
-              yield* clearPending(sessionID);
-              const result = yield* analyze(sessionID, "command").pipe(
-                Effect.catch((e) => Effect.succeed({ runID: "", findings: 0, summary: `Retro failed: ${errorMessage(e)}`, details: [] as never[] })),
-              );
-              const rules = db.ruleFrictionForSession(sessionID);
-              const lines = [
-                `**Session retro** (${result.findings} finding${result.findings === 1 ? "" : "s"}, ${rules.length} rule hit${rules.length === 1 ? "" : "s"})`,
-                "",
-                result.summary,
-              ];
-              const details = "details" in result ? (result.details ?? []) : [];
-              if (details.length) {
-                lines.push("", "**Findings**");
-                for (const f of details) lines.push(`- [${f.severity}] turn ${f.turn} ${f.type}: ${f.evidence}` + (f.harness_fix.target !== "none" ? `\n  → ${f.harness_fix.target}: ${f.harness_fix.suggestion}` : ""));
-              }
-              if (rules.length) {
-                lines.push("", "**Rule hits**");
-                for (const r of rules) lines.push(`- [${r.severity}] ${r.type}: ${r.evidence ?? ""}`);
-              }
-              yield* post(lines.join("\n"));
-            }).pipe(swallow("/retro")),
-        });
-      });
 
       // ---------- tools ----------
 

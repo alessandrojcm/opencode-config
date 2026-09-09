@@ -35,8 +35,12 @@ export const SessionRetro = Rpc.define({
       input: sessionInput,
       output: {
         type: "object",
-        properties: { runID: { type: "string" }, findings: { type: "number" } },
-        required: ["runID", "findings"],
+        properties: {
+          runID: { type: "string" },
+          findings: { type: "number" },
+          report: { type: "string" },
+        },
+        required: ["runID", "findings", "report"],
         additionalProperties: false,
       },
       errors: {
@@ -84,6 +88,20 @@ export const SessionRetro = Rpc.define({
           },
         },
         required: ["sessions"],
+        additionalProperties: false,
+      },
+    },
+    settings: {
+      input: sessionInput,
+      output: {
+        type: "object",
+        properties: {
+          projectDir: { type: "string" },
+          policy: { type: "string", enum: [...POLICIES] },
+          idleMinutes: { type: "number" },
+          dbPath: { type: "string" },
+        },
+        required: ["projectDir", "policy", "idleMinutes", "dbPath"],
         additionalProperties: false,
       },
     },

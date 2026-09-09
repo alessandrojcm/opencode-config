@@ -99,9 +99,9 @@ events:
   due     {sessionID, title, projectDir, turns, idleMinutes}
 ```
 
-Command `/retro [pending|settings]`: default = `run` for the current session
-(resets timer, clears pending, posts a synthetic summary message tagged
-`metadata.sessionRetro = true` so it is excluded from later analysis).
+CLI command `/retro [pending|settings]`: default = `run` for the current session
+(resets timer and clears pending). The TUI calls the server RPC and shows the
+report in a dialog; it does not post a synthetic transcript message.
 
 Tool `retro_query` (namespace `retro`, codemode on): `{sql}` read-only SELECT
 against retro.db (reject anything not starting with `SELECT`/`WITH`; open the
@@ -213,7 +213,7 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
   called when the session looks running, capped at 10 min; on timeout the run is
   refused rather than reading `session.context()` mid-turn.
 - **Synthetic `/retro` posts** use `resume: false`; otherwise the server schedules
-  another model turn after each post.
+  another model turn after each post. Superseded in the 2026-09-09 display fix below.
 - **Location filtering**: the plugin is instantiated once per open project and every
   instance sees the global event stream; each instance only records sessions whose
   location matches `ctx.location.directory`.
@@ -251,6 +251,14 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
 - **`options.analysisPromptPath`**: optional template file with `{{transcript}}` and
   `{{hints}}` placeholders; the output-shape instructions are always appended by
   `buildPrompt`, so a custom prompt cannot desync from the parser.
+
+## Implementation notes (display fix, 2026-09-09)
+
+- `/retro` is a CLI/TUI keymap slash command, not a server prompt command. The
+  server's `session.synthetic({ resume: false })` admits an inbox item but does not
+  guarantee immediate visible message content; this produced blank "Session retro"
+  rows in the transcript. The CLI now invokes the RPC and renders its report with
+  `ui.dialog.alert`, while `pending` and `settings` use the same direct UI path.
 
 ## Out of scope (v1)
 

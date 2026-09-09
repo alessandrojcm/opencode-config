@@ -1,7 +1,8 @@
 import { Plugin } from "@opencode-ai/plugin/tui";
 import { SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
 
-type RunResult = { runID: string; findings: number };
+type RunResult = { runID: string; findings: number; report: string };
+type SettingsResult = { projectDir: string; policy: Policy; idleMinutes: number; dbPath: string };
 
 type Choice = "run" | "skip" | "later" | "always" | "never";
 
@@ -81,12 +82,60 @@ export default Plugin.define({
       toast("Running retro…");
       await rpc
         .run({ sessionID: id })
-        .then((raw) => {
+        .then(async (raw) => {
           const r = raw as RunResult;
-          toast(`Retro done: ${r.findings} finding${r.findings === 1 ? "" : "s"}. Use retro_summary or /retro for details.`, "success");
+          toast(`Retro done: ${r.findings} finding${r.findings === 1 ? "" : "s"}.`, "success");
+          await context.ui.dialog.alert({ title: "Session retro", message: r.report });
         })
         .catch(fail("Retro"));
     }
+
+    function currentSessionID(): string | undefined {
+      const route = context.ui.router.current();
+      return route.type === "session" ? route.sessionID : undefined;
+    }
+
+    async function runCommand(input?: string) {
+      const arg = (input ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+      if (arg === "pending") {
+        const raw = (await rpc.pending({})) as { sessions: PendingSession[] };
+        const message = raw.sessions.length
+          ? raw.sessions.map((s) => `• ${s.title} (${s.sessionID})\n  ${s.turns} turns · ${s.projectDir}`).join("\n\n")
+          : "No sessions with a pending retro.";
+        await context.ui.dialog.alert({ title: "Pending retros", message });
+        return;
+      }
+
+      const sessionID = currentSessionID();
+      if (!sessionID) {
+        toast("Open a session before running /retro.", "warning");
+        return;
+      }
+      if (arg === "settings") {
+        const settings = (await rpc.settings({ sessionID })) as SettingsResult;
+        await context.ui.dialog.alert({
+          title: "Session retro settings",
+          message: `Project: ${settings.projectDir}\nPolicy: ${settings.policy}\nIdle minutes: ${settings.idleMinutes}\nDatabase: ${settings.dbPath}`,
+        });
+        return;
+      }
+      await runRetro(sessionID);
+    }
+
+    context.keymap.layer(() => ({
+      mode: "global",
+      commands: [
+        {
+          id: "session-retro.run",
+          title: "Run session retro",
+          description: "Analyze this session for friction (or use pending/settings).",
+          group: "Session retro",
+          palette: true,
+          slash: { name: "retro", arguments: true },
+          run: (input) => runCommand(input).catch(fail("Retro command")),
+        },
+      ],
+    }));
 
     async function act(id: string, due: DueEvent, choice: Choice) {
       const setPolicy = (policy: Policy) => rpc.policy({ projectDir: due.projectDir, policy });
