@@ -198,6 +198,7 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
 ```jsonc
 { "package": "./plugins/session-retro",
   "options": { "idleMinutes": 30, "analysisModel": { "providerID": "…", "id": "…" },
+               "analysisTimeoutSeconds": 180, "analysisPromptPath": null,
                "includeSubagents": true, "dbPath": null } }
 ```
 
@@ -224,6 +225,32 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
   timers/pending for deleted sessions.
 - TUI half imports `@opencode-ai/plugin/tui` (Promise API); there is no Effect
   entrypoint for CLI plugins.
+
+## Implementation notes (review, 2026-09-09)
+
+- **Bun-only runtime modules.** No `node:*` imports: `Bun.CryptoHasher` for hashing,
+  `Bun.env` for `HOME`/`XDG_DATA_HOME`, string ops for the one path. Bun has no native
+  `mkdir`, so `openDb` is `async` and creates the parent directory via
+  `Bun.write(path, "")` guarded by `Bun.file(path).exists()` (a zero-byte file is a
+  valid empty SQLite database; the guard prevents truncating a live one).
+- **Hooks never throw.** `execute.before` and `permission.evaluate` are wrapped in
+  `swallow` like `execute.after`; an unhandled error in a hook blocks every tool call
+  in the session (observed during the review when `openDb` became async mid-reload).
+- **`running` guard** uses `Effect.ensuring`; `try/finally` inside `Effect.gen` does
+  not run on a failed `yield*`, which left sessions permanently "already running".
+- **`v_worst_sessions`** aggregates turns and frictions in subqueries (the double
+  `LEFT JOIN` multiplied counts). Views are `drop`+`create` on migrate so definition
+  changes reach existing databases.
+- **`retro_query` guard** is first-keyword + single-statement only; the `readonly` +
+  `query_only` connection is what actually blocks writes (verified against a CTE-wrapped
+  `delete`). The old keyword blocklist rejected `select replace(...)`.
+- **Analysis shape** is one Effect `Schema` (`Analysis` in `analyze.ts`); `parseAnalysis`
+  decodes with it and `outputShapeBlock()` renders the same enums into the prompt.
+  `ctx.generate.text` is `{prompt, model?} → {text}` with no structured-output mode in
+  the current SDK, so this is the closest available equivalent.
+- **`options.analysisPromptPath`**: optional template file with `{{transcript}}` and
+  `{{hints}}` placeholders; the output-shape instructions are always appended by
+  `buildPrompt`, so a custom prompt cannot desync from the parser.
 
 ## Out of scope (v1)
 

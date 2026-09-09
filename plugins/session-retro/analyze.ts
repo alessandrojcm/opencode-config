@@ -1,3 +1,4 @@
+import { Result, Schema } from "effect";
 import type { FixTarget, Severity } from "./db.ts";
 import { summarizeInput } from "./rules.ts";
 
@@ -12,19 +13,36 @@ export const FINDING_TYPES = [
 ] as const;
 export type FindingType = (typeof FINDING_TYPES)[number];
 
-const SEVERITIES: readonly Severity[] = ["low", "medium", "high"];
-const TARGETS: readonly FixTarget[] = ["agents_md", "skill", "prompt", "permission", "plugin", "tool", "none"];
+const SEVERITIES = ["low", "medium", "high"] as const satisfies readonly Severity[];
+const TARGETS = ["agents_md", "skill", "prompt", "permission", "plugin", "tool", "none"] as const satisfies readonly FixTarget[];
 
-export type LlmFinding = {
-  type: FindingType;
-  turn: number;
-  severity: Severity;
-  evidence: string;
-  root_cause: string;
-  harness_fix: { target: FixTarget; suggestion: string };
-};
+/**
+ * Single source of truth for the LLM output shape. `parseAnalysis` decodes against it and
+ * `outputShapeBlock()` renders it into the prompt, so enum values cannot drift between the two.
+ * (ctx.generate.text has no structured-output mode in the current SDK; this is the parser-side equivalent.)
+ */
+export const LlmFinding = Schema.Struct({
+  type: Schema.Literals(FINDING_TYPES),
+  turn: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  severity: Schema.Literals(SEVERITIES),
+  evidence: Schema.String,
+  root_cause: Schema.String,
+  harness_fix: Schema.Struct({ target: Schema.Literals(TARGETS), suggestion: Schema.String }),
+});
+export type LlmFinding = typeof LlmFinding.Type;
 
-export type Analysis = { findings: LlmFinding[]; summary: string };
+export const Analysis = Schema.Struct({ findings: Schema.Array(LlmFinding), summary: Schema.String });
+export type Analysis = typeof Analysis.Type;
+
+const decodeAnalysis = Schema.decodeUnknownResult(Analysis);
+
+/** JSON skeleton shown to the model, derived from the same enum lists the schema uses. */
+export function outputShapeBlock(): string {
+  return `{"findings":[{"type":"${FINDING_TYPES.join("|")}",
+  "turn":3,"severity":"${SEVERITIES.join("|")}","evidence":"…","root_cause":"…",
+  "harness_fix":{"target":"${TARGETS.join("|")}","suggestion":"…"}}],
+ "summary":"one or two sentences"}`;
+}
 
 export type RuleHint = { type: string; turn: number; evidence: string };
 
@@ -105,12 +123,8 @@ function transcriptLines(messages: ReadonlyArray<ContextMessage>): string[] {
   return lines;
 }
 
-export function buildPrompt(transcript: string, hints: RuleHint[]): string {
-  const hintBlock =
-    hints.length === 0
-      ? "(no deterministic findings)"
-      : hints.map((h) => `- turn ${h.turn}: ${h.type} — ${h.evidence}`).join("\n");
-  return `You are reviewing a transcript of a coding-agent session to find friction that a better "harness"
+/** Default template. Custom templates (options.analysisPromptPath) use the same two placeholders. */
+export const DEFAULT_PROMPT_TEMPLATE = `You are reviewing a transcript of a coding-agent session to find friction that a better "harness"
 (AGENTS.md instructions, skills, prompts, permission rules, plugins, tool descriptions) could have prevented.
 
 Transcript format: "[turn N] USER:" lines are user messages; "ASSISTANT:" lines are assistant text; indented
@@ -126,18 +140,32 @@ Look for:
 - other
 
 Deterministic findings already detected (use as hints, do not merely repeat them):
-${hintBlock}
+{{hints}}
 
 Transcript:
 """
-${transcript}
-"""
+{{transcript}}
+"""`;
+
+export const TRANSCRIPT_PLACEHOLDER = "{{transcript}}";
+export const HINTS_PLACEHOLDER = "{{hints}}";
+
+function renderHints(hints: RuleHint[]): string {
+  return hints.length === 0 ? "(no deterministic findings)" : hints.map((h) => `- turn ${h.turn}: ${h.type} — ${h.evidence}`).join("\n");
+}
+
+/**
+ * Build the analysis prompt. `template` defaults to DEFAULT_PROMPT_TEMPLATE; a custom template must
+ * contain `{{transcript}}` (the hints placeholder is optional). The output-shape instructions are
+ * always appended by this function so a custom prompt cannot desync from `parseAnalysis`.
+ */
+export function buildPrompt(transcript: string, hints: RuleHint[], template: string = DEFAULT_PROMPT_TEMPLATE): string {
+  const tpl = template.includes(TRANSCRIPT_PLACEHOLDER) ? template : `${template}\n\nTranscript:\n"""\n${TRANSCRIPT_PLACEHOLDER}\n"""`;
+  const body = tpl.split(TRANSCRIPT_PLACEHOLDER).join(transcript).split(HINTS_PLACEHOLDER).join(renderHints(hints));
+  return `${body}
 
 Respond with JSON only, no prose, matching exactly:
-{"findings":[{"type":"user_correction|unnecessary_question|false_done|instruction_violated|wrong_tool|scope_creep|other",
-  "turn":3,"severity":"low|medium|high","evidence":"…","root_cause":"…",
-  "harness_fix":{"target":"agents_md|skill|prompt|permission|plugin|tool|none","suggestion":"…"}}],
- "summary":"one or two sentences"}
+${outputShapeBlock()}
 
 Only report findings with concrete evidence from the transcript. An empty findings array is a valid answer.`;
 }
@@ -153,10 +181,6 @@ function extractJson(raw: string): string {
   return raw.trim();
 }
 
-function isString(v: unknown): v is string {
-  return typeof v === "string";
-}
-
 export function parseAnalysis(raw: string): ParseResult {
   let data: unknown;
   try {
@@ -164,30 +188,7 @@ export function parseAnalysis(raw: string): ParseResult {
   } catch (e) {
     return { ok: false, error: `invalid JSON: ${e instanceof Error ? e.message : String(e)}` };
   }
-  if (!data || typeof data !== "object") return { ok: false, error: "root is not an object" };
-  const obj = data as Record<string, unknown>;
-  if (!Array.isArray(obj.findings)) return { ok: false, error: "findings is not an array" };
-  if (!isString(obj.summary)) return { ok: false, error: "summary is not a string" };
-  const findings: LlmFinding[] = [];
-  for (const [i, f] of obj.findings.entries()) {
-    if (!f || typeof f !== "object") return { ok: false, error: `findings[${i}] is not an object` };
-    const x = f as Record<string, unknown>;
-    if (!FINDING_TYPES.includes(x.type as FindingType)) return { ok: false, error: `findings[${i}].type invalid: ${String(x.type)}` };
-    if (typeof x.turn !== "number" || !Number.isInteger(x.turn) || x.turn < 0) return { ok: false, error: `findings[${i}].turn not a non-negative integer` };
-    if (!SEVERITIES.includes(x.severity as Severity)) return { ok: false, error: `findings[${i}].severity invalid` };
-    if (!isString(x.evidence) || !isString(x.root_cause)) return { ok: false, error: `findings[${i}] evidence/root_cause not strings` };
-    const fix = x.harness_fix as Record<string, unknown> | undefined;
-    if (!fix || typeof fix !== "object") return { ok: false, error: `findings[${i}].harness_fix missing` };
-    if (!TARGETS.includes(fix.target as FixTarget)) return { ok: false, error: `findings[${i}].harness_fix.target invalid` };
-    if (!isString(fix.suggestion)) return { ok: false, error: `findings[${i}].harness_fix.suggestion not a string` };
-    findings.push({
-      type: x.type as FindingType,
-      turn: x.turn,
-      severity: x.severity as Severity,
-      evidence: x.evidence,
-      root_cause: x.root_cause,
-      harness_fix: { target: fix.target as FixTarget, suggestion: fix.suggestion },
-    });
-  }
-  return { ok: true, value: { findings, summary: obj.summary } };
+  const decoded = decodeAnalysis(data);
+  if (Result.isFailure(decoded)) return { ok: false, error: String(decoded.failure).replace(/\s+/g, " ").trim() };
+  return { ok: true, value: decoded.success };
 }

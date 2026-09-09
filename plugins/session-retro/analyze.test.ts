@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildPrompt, compressTranscript, parseAnalysis } from "./analyze.ts";
+import { buildPrompt, compressTranscript, FINDING_TYPES, outputShapeBlock, parseAnalysis } from "./analyze.ts";
 
 const messages = [
   { id: "u1", type: "user", time: { created: 1 }, text: "please fix the build" },
@@ -54,6 +54,29 @@ describe("buildPrompt", () => {
     expect(p).toContain("TRANSCRIPT");
     expect(p).toContain("flailing");
     expect(p).toMatch(/JSON/);
+    expect(p).not.toContain("{{");
+  });
+
+  test("custom template: placeholders substituted, output shape always appended", () => {
+    const p = buildPrompt("T-BODY", [{ type: "blocked", turn: 2, evidence: "waited" }], "Custom intro.\n{{hints}}\n---\n{{transcript}}\n---");
+    expect(p.startsWith("Custom intro.")).toBe(true);
+    expect(p).toContain("- turn 2: blocked — waited");
+    expect(p).toContain("---\nT-BODY\n---");
+    expect(p).toContain(outputShapeBlock());
+    expect(p).not.toContain("{{");
+  });
+
+  test("custom template without a transcript placeholder still gets the transcript", () => {
+    const p = buildPrompt("T-BODY", [], "Just instructions.");
+    expect(p).toContain("T-BODY");
+    expect(p).toContain(outputShapeBlock());
+  });
+
+  test("output shape block lists every enum value the parser accepts", () => {
+    const block = outputShapeBlock();
+    for (const t of FINDING_TYPES) expect(block).toContain(t);
+    for (const t of ["agents_md", "skill", "prompt", "permission", "plugin", "tool", "none"]) expect(block).toContain(t);
+    for (const s of ["low", "medium", "high"]) expect(block).toContain(s);
   });
 });
 
@@ -73,6 +96,18 @@ describe("parseAnalysis", () => {
     expect(parseAnalysis('{"summary":"x"}').ok).toBe(false);
     expect(parseAnalysis('{"findings":[{"type":"nope","turn":1,"severity":"low","evidence":"","root_cause":"","harness_fix":{"target":"none","suggestion":""}}],"summary":""}').ok).toBe(false);
     expect(parseAnalysis('{"findings":[{"type":"other","turn":"1","severity":"low","evidence":"","root_cause":"","harness_fix":{"target":"none","suggestion":""}}],"summary":""}').ok).toBe(false);
+  });
+
+  test("reports the failing path from the schema", () => {
+    const r = parseAnalysis('{"findings":[{"type":"other","turn":-1,"severity":"low","evidence":"","root_cause":"","harness_fix":{"target":"none","suggestion":""}}],"summary":""}');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('["findings"][0]["turn"]');
+  });
+
+  test("tolerates extra keys and surrounding prose", () => {
+    const r = parseAnalysis('Here you go:\n{"findings":[],"summary":"clean","confidence":0.9}\nHope that helps.');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.summary).toBe("clean");
   });
 
   test("accepts empty findings", () => {

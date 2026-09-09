@@ -1,8 +1,6 @@
 import { Plugin } from "@opencode-ai/plugin/effect";
 import type { Session } from "@opencode-ai/schema/session";
 import { Cause, Effect, FiberMap, Schema, Stream } from "effect";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { buildPrompt, compressTranscript, parseAnalysis, RETRO_METADATA_KEY, type ContextMessage, type RuleHint } from "./analyze.ts";
 import { openDb, type Db, type Outcome } from "./db.ts";
 import { POLICIES, SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
@@ -16,6 +14,11 @@ type Options = {
   analysisTimeoutSeconds?: number;
   includeSubagents?: boolean;
   dbPath?: string | null;
+  /**
+   * Path to a custom analysis prompt template. `{{transcript}}` and `{{hints}}` are substituted;
+   * the JSON output-shape instructions are always appended so the parser and prompt stay in sync.
+   */
+  analysisPromptPath?: string | null;
 };
 
 type SessionState = {
@@ -30,9 +33,9 @@ type PendingRecord = { title: string; projectDir: string; dueAt: number };
 const PENDING_PREFIX = "pending/";
 
 function defaultDbPath(): string {
-  const xdg = process.env.XDG_DATA_HOME;
-  const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".local", "share");
-  return join(base, "opencode", "session-retro.db");
+  const xdg = Bun.env.XDG_DATA_HOME;
+  const base = xdg && xdg.length > 0 ? xdg : `${Bun.env.HOME ?? "."}/.local/share`;
+  return `${base.replace(/\/+$/, "")}/opencode/session-retro.db`;
 }
 
 function errorMessage(cause: unknown): string {
@@ -63,8 +66,18 @@ export default Plugin.define({
       const dbPath = options.dbPath && options.dbPath.length > 0 ? options.dbPath : defaultDbPath();
 
       const db: Db = yield* Effect.acquireRelease(
-        Effect.sync(() => openDb(dbPath)),
+        Effect.promise(() => openDb(dbPath)),
         (d) => Effect.sync(() => d.close()),
+      );
+
+      // Custom prompt template, read once at startup; a missing/unreadable file falls back to the default.
+      const promptTemplate: string | undefined = yield* Effect.gen(function* () {
+        const p = options.analysisPromptPath;
+        if (!p || p.length === 0) return undefined;
+        const text = yield* Effect.tryPromise(() => Bun.file(p).text());
+        return text;
+      }).pipe(
+        Effect.catch((e) => Effect.logWarning(`session-retro: analysisPromptPath unreadable, using default prompt`, errorMessage(e)).pipe(Effect.as(undefined))),
       );
 
       const here = ctx.location.directory;
@@ -172,74 +185,77 @@ export default Plugin.define({
 
       // ---------- analysis ----------
 
-      const analyze = Effect.fn("retro.analyze")(function* (sessionID: string, trigger: string) {
-        if (running.has(sessionID)) return yield* Effect.fail(new Error("analysis already running for this session"));
-        running.add(sessionID);
-        try {
-          yield* ensureSession(sessionID);
-          // Only wait when we know the session is running; a bare wait on an idle session
-          // can hang indefinitely in the current server build.
-          const info = yield* ctx.session.get({ sessionID: sid(sessionID) });
-          const isRunning = info.time.idle === undefined || (info.time.idle < info.time.updated && info.outcome === undefined);
-          if (isRunning) {
-            const waited = yield* ctx.session.wait({ sessionID: sid(sessionID) }).pipe(Effect.timeoutOption("10 minutes"));
-            // Principle 3: never read session.context() while a turn is in flight.
-            if (waited._tag === "None") return yield* Effect.fail(new Error("session is still running; retro not started"));
-          }
-          const messages = yield* ctx.session.context({ sessionID: sid(sessionID) });
-          const transcript = compressTranscript(messages as unknown as ReadonlyArray<ContextMessage>);
-          const turns = db.turnsForSession(sessionID);
-          const turnIndex = new Map(turns.map((t) => [t.id, t.idx + 1]));
-          const hints: RuleHint[] = db.ruleFrictionForSession(sessionID).map((f) => ({
-            type: f.type,
-            turn: f.turn_id ? (turnIndex.get(f.turn_id) ?? 0) : 0,
-            evidence: f.evidence ?? "",
-          }));
-          const prompt = buildPrompt(transcript, hints);
-          // Prefer the configured analysis model, then the session's own model (the catalog default
-          // may be a provider the user cannot reach outside the TUI).
-          const modelRef = options.analysisModel
-            ? ({ providerID: options.analysisModel.providerID, id: options.analysisModel.id } as const)
-            : info.model
-              ? ({ providerID: info.model.providerID, id: info.model.id } as const)
-              : undefined;
-          const modelLabel = modelRef ? `${modelRef.providerID}/${modelRef.id}` : "default";
-          const result = yield* ctx.generate
-            .text(modelRef ? { prompt, model: modelRef as never } : { prompt })
-            .pipe(
-              Effect.timeoutOption(analysisTimeoutMs),
-              Effect.flatMap((r) =>
-                r._tag === "Some"
-                  ? Effect.succeed(r.value)
-                  : Effect.fail(new Error(`analysis model ${modelLabel} did not answer within ${Math.round(analysisTimeoutMs / 1000)}s`)),
-              ),
-            );
-          const parsed = parseAnalysis(result.text);
-          if (!parsed.ok) {
-            const runID = db.insertRun({ sessionId: sessionID, trigger, model: modelLabel, status: "parse_error", rawOutput: result.text, summary: parsed.error });
-            return { runID, findings: 0, summary: `Analysis output could not be parsed: ${parsed.error}` };
-          }
-          const runID = db.insertRun({ sessionId: sessionID, trigger, model: modelLabel, status: "ok", summary: parsed.value.summary, rawOutput: result.text });
-          for (const f of parsed.value.findings) {
-            const turn = turns[f.turn - 1];
-            db.insertFriction({
-              sessionId: sessionID,
-              turnId: turn?.id ?? null,
-              source: "llm",
-              type: f.type,
-              severity: f.severity,
-              evidence: f.evidence,
-              rootCause: f.root_cause,
-              fixTarget: f.harness_fix.target,
-              fixSuggestion: f.harness_fix.suggestion,
-              runId: runID,
-            });
-          }
-          return { runID, findings: parsed.value.findings.length, summary: parsed.value.summary, details: parsed.value.findings };
-        } finally {
-          running.delete(sessionID);
+      const analyzeBody = Effect.fn("retro.analyze")(function* (sessionID: string, trigger: string) {
+        yield* ensureSession(sessionID);
+        // Only wait when we know the session is running; a bare wait on an idle session
+        // can hang indefinitely in the current server build.
+        const info = yield* ctx.session.get({ sessionID: sid(sessionID) });
+        const isRunning = info.time.idle === undefined || (info.time.idle < info.time.updated && info.outcome === undefined);
+        if (isRunning) {
+          const waited = yield* ctx.session.wait({ sessionID: sid(sessionID) }).pipe(Effect.timeoutOption("10 minutes"));
+          // Principle 3: never read session.context() while a turn is in flight.
+          if (waited._tag === "None") return yield* Effect.fail(new Error("session is still running; retro not started"));
         }
+        const messages = yield* ctx.session.context({ sessionID: sid(sessionID) });
+        const transcript = compressTranscript(messages as unknown as ReadonlyArray<ContextMessage>);
+        const turns = db.turnsForSession(sessionID);
+        const turnIndex = new Map(turns.map((t) => [t.id, t.idx + 1]));
+        const hints: RuleHint[] = db.ruleFrictionForSession(sessionID).map((f) => ({
+          type: f.type,
+          turn: f.turn_id ? (turnIndex.get(f.turn_id) ?? 0) : 0,
+          evidence: f.evidence ?? "",
+        }));
+        const prompt = buildPrompt(transcript, hints, promptTemplate);
+        // Prefer the configured analysis model, then the session's own model (the catalog default
+        // may be a provider the user cannot reach outside the TUI).
+        const modelRef = options.analysisModel
+          ? ({ providerID: options.analysisModel.providerID, id: options.analysisModel.id } as const)
+          : info.model
+            ? ({ providerID: info.model.providerID, id: info.model.id } as const)
+            : undefined;
+        const modelLabel = modelRef ? `${modelRef.providerID}/${modelRef.id}` : "default";
+        const result = yield* ctx.generate
+          .text(modelRef ? { prompt, model: modelRef as never } : { prompt })
+          .pipe(
+            Effect.timeoutOption(analysisTimeoutMs),
+            Effect.flatMap((r) =>
+              r._tag === "Some"
+                ? Effect.succeed(r.value)
+                : Effect.fail(new Error(`analysis model ${modelLabel} did not answer within ${Math.round(analysisTimeoutMs / 1000)}s`)),
+            ),
+          );
+        const parsed = parseAnalysis(result.text);
+        if (!parsed.ok) {
+          const runID = db.insertRun({ sessionId: sessionID, trigger, model: modelLabel, status: "parse_error", rawOutput: result.text, summary: parsed.error });
+          return { runID, findings: 0, summary: `Analysis output could not be parsed: ${parsed.error}` };
+        }
+        const runID = db.insertRun({ sessionId: sessionID, trigger, model: modelLabel, status: "ok", summary: parsed.value.summary, rawOutput: result.text });
+        for (const f of parsed.value.findings) {
+          const turn = turns[f.turn - 1];
+          db.insertFriction({
+            sessionId: sessionID,
+            turnId: turn?.id ?? null,
+            source: "llm",
+            type: f.type,
+            severity: f.severity,
+            evidence: f.evidence,
+            rootCause: f.root_cause,
+            fixTarget: f.harness_fix.target,
+            fixSuggestion: f.harness_fix.suggestion,
+            runId: runID,
+          });
+        }
+        return { runID, findings: parsed.value.findings.length, summary: parsed.value.summary, details: parsed.value.findings };
       });
+
+      // One analysis per session at a time. `Effect.ensuring` (not try/finally inside the generator)
+      // releases the guard on failure, timeout and interruption alike.
+      const analyze = (sessionID: string, trigger: string) =>
+        Effect.suspend(() => {
+          if (running.has(sessionID)) return Effect.fail(new Error("analysis already running for this session"));
+          running.add(sessionID);
+          return analyzeBody(sessionID, trigger).pipe(Effect.ensuring(Effect.sync(() => running.delete(sessionID))));
+        });
 
       // ---------- idle timer ----------
 
@@ -305,11 +321,13 @@ export default Plugin.define({
 
       // ---------- hooks ----------
 
+      // Every hook is wrapped in `swallow`: a recording failure must never abort the agent's tool
+      // call or permission evaluation (spec principle 2). An unwrapped throw here blocks every tool.
       yield* ctx.tool.hook("execute.before", (event) =>
         Effect.sync(() => {
           if (!tracked(event.sessionID)) return;
           stateFor(event.sessionID).toolStart.set(event.id, Date.now());
-        }),
+        }).pipe(swallow("tool.execute.before")),
       );
 
       yield* ctx.tool.hook("execute.after", (event) =>
@@ -340,7 +358,7 @@ export default Plugin.define({
           if (event.effect !== "ask" || !tracked(event.sessionID)) return;
           const key = event.source?.type === "tool" ? event.source.id : `${event.action}:${event.resources.join(",")}`;
           stateFor(event.sessionID).permissionAsk.set(key, Date.now());
-        }),
+        }).pipe(swallow("permission.evaluate")),
       );
 
       // ---------- events ----------
@@ -550,8 +568,8 @@ export default Plugin.define({
           input: QueryInput,
           options: { namespace: "retro", codemode: true },
           execute: ({ sql }) =>
-            Effect.sync(() => {
-              const ro = openDb(dbPath, { readonly: true });
+            Effect.gen(function* () {
+              const ro = yield* Effect.promise(() => openDb(dbPath, { readonly: true }));
               try {
                 const rows = ro.readonlyQuery(sql);
                 return { content: JSON.stringify(rows, null, 2), metadata: { title: "retro query", rows: rows.length } };
@@ -585,7 +603,8 @@ export default Plugin.define({
         });
       });
 
-      // flush counters on unload: close any open turns without an outcome as "interrupted" is wrong; leave them open
+      // On unload, flush in-memory permission waits and bump last_seen. Open turns are left open on
+      // purpose: an unload is not an outcome, and closing them as "interrupted" would be a false signal.
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           const now = Date.now();

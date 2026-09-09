@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { FixTarget, Severity, ToolCallRow, TurnRow } from "./db.ts";
 
 export type RuleFinding = {
@@ -148,7 +147,10 @@ function canonical(value: unknown): unknown {
 }
 
 export function hashInput(input: unknown): string {
-  return createHash("sha1").update(JSON.stringify(canonical(input)) ?? "undefined").digest("hex").slice(0, 16);
+  return new Bun.CryptoHasher("sha1")
+    .update(JSON.stringify(canonical(input)) ?? "undefined")
+    .digest("hex")
+    .slice(0, 16);
 }
 
 const SUMMARY_KEYS = ["command", "path", "filePath", "file", "pattern", "query", "url", "sql", "prompt", "description"];

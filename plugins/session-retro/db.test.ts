@@ -4,10 +4,11 @@ import { openDb } from "./db.ts";
 function fresh() {
   return openDb(":memory:");
 }
+// openDb is async (Bun-native directory creation); every test awaits it.
 
 describe("db", () => {
-  test("creates schema idempotently", () => {
-    const db = fresh();
+  test("creates schema idempotently", async () => {
+    const db = await fresh();
     db.migrate();
     db.migrate();
     const tables = db.raw
@@ -19,8 +20,8 @@ describe("db", () => {
     );
   });
 
-  test("session upsert keeps first_seen, bumps last_seen", () => {
-    const db = fresh();
+  test("session upsert keeps first_seen, bumps last_seen", async () => {
+    const db = await fresh();
     db.upsertSession({ id: "s1", projectDir: "/p", title: "a", now: 100 });
     db.upsertSession({ id: "s1", projectDir: "/p", title: "b", now: 200 });
     const row = db.session("s1");
@@ -29,8 +30,8 @@ describe("db", () => {
     expect(row?.title).toBe("b");
   });
 
-  test("turn lifecycle: open, increment counters, close, index increments per session", () => {
-    const db = fresh();
+  test("turn lifecycle: open, increment counters, close, index increments per session", async () => {
+    const db = await fresh();
     db.upsertSession({ id: "s1", projectDir: "/p", now: 1 });
     const t1 = db.openTurn("s1", 10);
     db.bumpTurn(t1, "retries");
@@ -55,8 +56,8 @@ describe("db", () => {
     expect(a.ended).toBe(20);
   });
 
-  test("tool calls attach to turn and bump tool_calls counter", () => {
-    const db = fresh();
+  test("tool calls attach to turn and bump tool_calls counter", async () => {
+    const db = await fresh();
     db.upsertSession({ id: "s1", projectDir: "/p", now: 1 });
     const t = db.openTurn("s1", 10);
     db.insertToolCall({
@@ -82,16 +83,16 @@ describe("db", () => {
     expect(db.toolCalls(t).map((c) => c.status)).toEqual(["completed", "error"]);
   });
 
-  test("openTurn returns the existing open turn for a session", () => {
-    const db = fresh();
+  test("openTurn returns the existing open turn for a session", async () => {
+    const db = await fresh();
     db.upsertSession({ id: "s1", projectDir: "/p", now: 1 });
     const t = db.openTurn("s1", 10);
     expect(db.openTurn("s1", 11)).toBe(t);
     expect(db.currentTurn("s1")).toBe(t);
   });
 
-  test("p90 tool calls per agent over closed turns", () => {
-    const db = fresh();
+  test("p90 tool calls per agent over closed turns", async () => {
+    const db = await fresh();
     db.upsertSession({ id: "s1", projectDir: "/p", agent: "build", now: 1 });
     for (let i = 0; i < 10; i++) {
       const t = db.openTurn("s1", i);
@@ -105,8 +106,8 @@ describe("db", () => {
     expect(db.toolCallsP90ForAgent("nobody")).toBeUndefined();
   });
 
-  test("friction, retro_run and policy round-trip", () => {
-    const db = fresh();
+  test("friction, retro_run and policy round-trip", async () => {
+    const db = await fresh();
     db.upsertSession({ id: "s1", projectDir: "/p", now: 1 });
     const t = db.openTurn("s1", 10);
     db.closeTurn(t, "interrupted", 20);
@@ -123,15 +124,32 @@ describe("db", () => {
     expect(db.policy("/p")).toBeUndefined();
   });
 
-  test("readonly query rejects non-select", () => {
-    const db = fresh();
+  test("readonly query rejects non-select", async () => {
+    const db = await fresh();
     expect(() => db.readonlyQuery("delete from session")).toThrow(/SELECT/);
     expect(db.readonlyQuery("select 1 as one")).toEqual([{ one: 1 }]);
     expect(db.readonlyQuery("with x as (select 2 as two) select * from x")).toEqual([{ two: 2 }]);
   });
 
-  test("views exist", () => {
-    const db = fresh();
+  test("v_worst_sessions does not multiply frictions by turns", async () => {
+    const db = await fresh();
+    db.upsertSession({ id: "s1", projectDir: "/p", now: 1 });
+    for (let i = 0; i < 5; i++) {
+      const t = db.openTurn("s1", i);
+      db.closeTurn(t, i === 0 ? "interrupted" : "succeeded", i + 1);
+    }
+    db.insertFriction({ sessionId: "s1", source: "rule", type: "flailing", severity: "high", evidence: "x" });
+    db.insertFriction({ sessionId: "s1", source: "rule", type: "blocked", severity: "medium", evidence: "y" });
+    db.upsertSession({ id: "empty", projectDir: "/p", now: 1 });
+    const rows = db.readonlyQuery("select id, turns, frictions, score, interrupted_turns from v_worst_sessions order by id");
+    expect(rows).toEqual([
+      { id: "empty", turns: 0, frictions: 0, score: null, interrupted_turns: 0 },
+      { id: "s1", turns: 5, frictions: 2, score: 5, interrupted_turns: 1 },
+    ]);
+  });
+
+  test("views exist", async () => {
+    const db = await fresh();
     for (const v of ["v_worst_sessions", "v_tool_error_rates", "v_friction_by_type", "v_harness_fixes"]) {
       expect(() => db.readonlyQuery(`select * from ${v}`)).not.toThrow();
     }
@@ -139,10 +157,37 @@ describe("db", () => {
 });
 
 describe("db readonly hardening", () => {
-  test("rejects CTE-wrapped writes and multiple statements", () => {
-    const db = openDb(":memory:");
-    expect(() => db.readonlyQuery("with x as (select 1) delete from session")).toThrow(/write keyword/);
+  test("rejects multiple statements, allows write-looking words inside a SELECT", async () => {
+    const db = await openDb(":memory:");
     expect(() => db.readonlyQuery("select 1; select 2")).toThrow(/single statement/);
     expect(db.readonlyQuery("select 1 as a;")).toEqual([{ a: 1 }]);
+    // Previously rejected by a keyword blocklist; the readonly connection is the real guard.
+    expect(db.readonlyQuery("select replace('a-b', '-', '_') as r")).toEqual([{ r: "a_b" }]);
+    expect(db.readonlyQuery("select count(*) as n from friction where type = 'update'")).toEqual([{ n: 0 }]);
+  });
+
+  test("readonly connection refuses CTE-wrapped writes at the SQLite level", async () => {
+    const dir = `${import.meta.dir}/.tmp-${Date.now()}`;
+    const path = `${dir}/ro.db`;
+    const w = await openDb(path);
+    w.upsertSession({ id: "s1", projectDir: "/p", now: 1 });
+    w.close();
+    const ro = await openDb(path, { readonly: true });
+    expect(() => ro.readonlyQuery("with x as (select 1) delete from session")).toThrow();
+    expect(ro.readonlyQuery("select count(*) as n from session")).toEqual([{ n: 1 }]);
+    ro.close();
+    await Bun.$`rm -rf ${dir}`.quiet();
+  });
+
+  test("openDb creates missing parent directories and does not truncate an existing db", async () => {
+    const dir = `${import.meta.dir}/.tmp-${Date.now()}-b`;
+    const path = `${dir}/nested/deeper/retro.db`;
+    const a = await openDb(path);
+    a.upsertSession({ id: "keep", projectDir: "/p", now: 1 });
+    a.close();
+    const b = await openDb(path);
+    expect(b.session("keep")?.id).toBe("keep");
+    b.close();
+    await Bun.$`rm -rf ${dir}`.quiet();
   });
 });
