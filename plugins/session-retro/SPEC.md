@@ -101,7 +101,7 @@ events:
 
 CLI command `/retro [pending|settings]`: default = `run` for the current session
 (resets timer and clears pending). The TUI calls the server RPC and opens a
-scrollable report page in the main content area; it does not post a synthetic
+scrollable, theme-aware rendered Markdown page in the main content area; it does not post a synthetic
 transcript message or trigger another model turn. On a retro report, `e` prompts
 for a project-relative or absolute path and exports actionable Markdown. Existing
 files require overwrite confirmation.

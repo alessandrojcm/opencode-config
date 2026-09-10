@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
-import type { ScrollBoxRenderable } from "@opentui/core";
+import { SyntaxStyle, type RGBA, type ScrollBoxRenderable, type ThemeTokenStyle } from "@opentui/core";
 import { Plugin } from "@opencode-ai/plugin/tui";
+import { onCleanup } from "solid-js";
 import { defaultRetroExportPath, resolveMarkdownExportPath, writeMarkdownExport } from "./report.ts";
 import { SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
 
@@ -20,10 +21,45 @@ type ReportPageData = {
 const ASK_GRACE_MS = 2_000;
 const REPORT_ROUTE = "session-retro-report";
 
+function syntaxRule(scope: string[], foreground: RGBA, style: Omit<ThemeTokenStyle["style"], "foreground"> = {}): ThemeTokenStyle {
+  return { scope, style: { foreground, ...style } };
+}
+
+function reportSyntaxStyle(context: Plugin.Context): SyntaxStyle {
+  const theme = context.theme;
+  const syntax = theme.syntax;
+  const markdown = theme.markdown;
+  return SyntaxStyle.fromTheme([
+    syntaxRule(["default"], theme.text.default),
+    syntaxRule(["comment", "comment.documentation"], syntax.comment, { italic: true }),
+    syntaxRule(["string", "symbol", "character"], syntax.string),
+    syntaxRule(["number", "boolean", "constant", "float"], syntax.number),
+    syntaxRule(["keyword", "keyword.return", "keyword.conditional"], syntax.keyword, { italic: true }),
+    syntaxRule(["function", "function.call", "function.method"], syntax.function),
+    syntaxRule(["variable", "property", "parameter", "field"], syntax.variable),
+    syntaxRule(["type", "module", "class", "namespace"], syntax.type),
+    syntaxRule(["operator", "keyword.operator"], syntax.operator),
+    syntaxRule(["punctuation", "punctuation.bracket", "punctuation.delimiter"], syntax.punctuation),
+    syntaxRule(["markup.heading", "markup.heading.2", "markup.heading.3", "markup.heading.4"], markdown.heading, { bold: true }),
+    syntaxRule(["markup.heading.1"], markdown.heading, { bold: true, underline: true }),
+    syntaxRule(["markup.bold", "markup.strong"], markdown.strong, { bold: true }),
+    syntaxRule(["markup.italic"], markdown.emphasis, { italic: true }),
+    syntaxRule(["markup.list"], markdown.listItem),
+    syntaxRule(["markup.quote"], markdown.blockQuote, { italic: true }),
+    syntaxRule(["markup.raw", "markup.raw.block"], markdown.code),
+    syntaxRule(["markup.raw.inline"], markdown.code, { background: theme.background.default }),
+    syntaxRule(["markup.link", "markup.link.url"], markdown.link, { underline: true }),
+    syntaxRule(["markup.link.label"], markdown.linkText, { underline: true }),
+  ]);
+}
+
 function ReportPage(props: { context: Plugin.Context; data?: ReportPageData }) {
   const theme = props.context.theme;
   const data = props.data;
+  const syntaxStyle = reportSyntaxStyle(props.context);
   let scroll: ScrollBoxRenderable | undefined;
+
+  onCleanup(() => syntaxStyle.destroy());
 
   const close = () => props.context.ui.router.navigate(data?.returnRoute ?? { type: "home" });
   const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") =>
@@ -87,9 +123,16 @@ function ReportPage(props: { context: Plugin.Context; data?: ReportPageData }) {
         horizontalScrollbarOptions={{ visible: false }}
       >
         <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="column">
-          <text fg={theme.text.default} wrapMode="word" selectable={true}>
-            {data?.report ?? "No retro report is available."}
-          </text>
+          <markdown
+            width="100%"
+            syntaxStyle={syntaxStyle}
+            content={data?.report ?? "No retro report is available."}
+            internalBlockMode="top-level"
+            tableOptions={{ style: "grid", cellPaddingX: 1 }}
+            conceal={true}
+            fg={theme.markdown.text}
+            bg={theme.background.default}
+          />
         </box>
       </scrollbox>
       <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
