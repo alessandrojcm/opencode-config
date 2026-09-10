@@ -90,7 +90,7 @@ RPC (`rpc.ts`):
 
 ```
 methods:
-  run     {sessionID}              → {runID, findings: number}   // waits via session.wait, then analyzes
+  run     {sessionID}              → {runID, ranAt, findings: number, report} // waits, analyzes, returns Markdown
   skip    {sessionID}              → {}                          // clears pending
   later   {sessionID}              → {}                          // keeps pending, resets timer
   policy  {projectDir, policy: "always"|"never"|"ask"} → {}
@@ -102,12 +102,16 @@ events:
 CLI command `/retro [pending|settings]`: default = `run` for the current session
 (resets timer and clears pending). The TUI calls the server RPC and opens a
 scrollable report page in the main content area; it does not post a synthetic
-transcript message or trigger another model turn.
+transcript message or trigger another model turn. On a retro report, `e` prompts
+for a project-relative or absolute path and exports actionable Markdown. Existing
+files require overwrite confirmation.
 
 Tool `retro_query` (namespace `retro`, codemode on): `{sql}` read-only SELECT
 against retro.db (reject anything not starting with `SELECT`/`WITH`; open the
 DB `readonly`). `retro_summary {sessionID?}` returns the latest `retro_run` +
-findings for a session.
+findings for a session. `retro_context {runID}` resolves the durable run handle
+embedded in exported Markdown and returns its session row, turns, summarized
+tool calls, and rule/LLM findings from SQLite.
 
 ### TUI half (`tui.tsx`)
 

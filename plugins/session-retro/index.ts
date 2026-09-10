@@ -4,6 +4,7 @@ import { Cause, Effect, FiberMap, Schema, Stream } from "effect";
 import { buildPrompt, compressTranscript, parseAnalysis, type ContextMessage, type RuleHint } from "./analyze.ts";
 import { openDb, type Db, type Outcome } from "./db.ts";
 import { POLICIES, SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
+import { formatRetroReport, type ReportFinding } from "./report.ts";
 import { detect, hashInput, summarizeInput } from "./rules.ts";
 
 type Options = {
@@ -51,6 +52,10 @@ const QueryInput = Schema.Struct({
 
 const SummaryInput = Schema.Struct({
   sessionID: Schema.optional(Schema.String).annotate({ description: "Session to summarise. Defaults to the calling session." }),
+});
+
+const ContextInput = Schema.Struct({
+  runID: Schema.String.annotate({ description: "Retro run ID shown in an exported session-retro Markdown report." }),
 });
 
 export default Plugin.define({
@@ -258,27 +263,21 @@ export default Plugin.define({
         });
 
       const reportFor = (
-        result: { findings: number; summary: string; details?: ReadonlyArray<{ severity: string; turn: number; type: string; evidence: string; harness_fix: { target: string; suggestion: string } }> },
+        result: { runID: string; findings: number; summary: string; details?: ReadonlyArray<ReportFinding> },
         sessionID: string,
       ) => {
+        const run = db.run(result.runID);
+        if (!run) throw new Error(`retro run ${result.runID} was not persisted`);
         const rules = db.ruleFrictionForSession(sessionID);
-        const lines = [
-          `Session retro (${result.findings} finding${result.findings === 1 ? "" : "s"}, ${rules.length} rule hit${rules.length === 1 ? "" : "s"})`,
-          "",
-          result.summary,
-        ];
-        if (result.details?.length) {
-          lines.push("", "Findings");
-          for (const f of result.details) {
-            lines.push(`• [${f.severity}] turn ${f.turn} ${f.type}: ${f.evidence}`);
-            if (f.harness_fix.target !== "none") lines.push(`  → ${f.harness_fix.target}: ${f.harness_fix.suggestion}`);
-          }
-        }
-        if (rules.length) {
-          lines.push("", "Rule hits");
-          for (const r of rules) lines.push(`• [${r.severity}] ${r.type}: ${r.evidence ?? ""}`);
-        }
-        return lines.join("\n");
+        return formatRetroReport({
+          findings: result.findings,
+          summary: result.summary,
+          details: result.details,
+          run,
+          session: db.session(sessionID),
+          rules,
+          dbPath,
+        });
       };
 
       // ---------- idle timer ----------
@@ -505,7 +504,12 @@ export default Plugin.define({
             const result = yield* analyze(sessionID, "manual").pipe(
               Effect.mapError((e) => call.error("analysis_failed", errorMessage(e), { message: errorMessage(e) })),
             );
-            return { runID: result.runID, findings: result.findings, report: reportFor(result, sessionID) };
+            const run = db.run(result.runID);
+            if (!run) {
+              const message = `retro run ${result.runID} was not persisted`;
+              return yield* Effect.fail(call.error("analysis_failed", message, { message }));
+            }
+            return { runID: result.runID, ranAt: run.ran_at, findings: result.findings, report: reportFor(result, sessionID) };
           }),
         skip: (input) =>
           Effect.gen(function* () {
@@ -580,6 +584,31 @@ export default Plugin.define({
                 turns: db.turnsForSession(id).length,
               };
               return { content: JSON.stringify(out, null, 2), metadata: { title: "retro summary", sessionID: id } };
+            }),
+        });
+
+        draft.add({
+          name: "retro_context",
+          description:
+            "Retrieve the recorded session, retro run, turns, summarized tool calls, and findings from the session-retro database using the run ID embedded in an exported Markdown report.",
+          input: ContextInput,
+          options: { namespace: "retro", codemode: true },
+          execute: ({ runID }) =>
+            Effect.sync(() => {
+              const run = db.run(runID);
+              if (!run) {
+                return { content: `No retro run found for ${runID}`, metadata: { title: "retro context", runID, error: true } };
+              }
+              const session = db.session(run.session_id);
+              const turns = db.turnsForSession(run.session_id).map((turn) => ({ ...turn, toolCalls: db.toolCalls(turn.id) }));
+              const out = {
+                run,
+                session: session ?? null,
+                turns,
+                llmFindings: db.frictionForRun(run.id),
+                ruleFindings: db.ruleFrictionForSession(run.session_id),
+              };
+              return { content: JSON.stringify(out, null, 2), metadata: { title: "retro context", runID, sessionID: run.session_id } };
             }),
         });
       });

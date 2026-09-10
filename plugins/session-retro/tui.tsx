@@ -1,9 +1,10 @@
 /** @jsxImportSource @opentui/solid */
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { Plugin } from "@opencode-ai/plugin/tui";
+import { defaultRetroExportPath, resolveMarkdownExportPath, writeMarkdownExport } from "./report.ts";
 import { SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
 
-type RunResult = { runID: string; findings: number; report: string };
+type RunResult = { runID: string; ranAt: number; findings: number; report: string };
 type SettingsResult = { projectDir: string; policy: Policy; idleMinutes: number; dbPath: string };
 
 type Choice = "run" | "skip" | "later" | "always" | "never";
@@ -12,6 +13,7 @@ type ReportPageData = {
   title: string;
   report: string;
   sessionID?: string;
+  exportPath?: string;
   returnRoute: Route;
 };
 
@@ -24,10 +26,39 @@ function ReportPage(props: { context: Plugin.Context; data?: Record<string, any>
   let scroll: ScrollBoxRenderable | undefined;
 
   const close = () => props.context.ui.router.navigate(data?.returnRoute ?? { type: "home" });
+  const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") =>
+    props.context.ui.toast.show({ title: "Session retro", message, variant });
+  const exportReport = async () => {
+    if (!data?.exportPath) return;
+    const projectDir = props.context.location?.directory ?? props.context.data.location.default().directory;
+    const requested = await props.context.ui.dialog.prompt({
+      title: "Export retro to Markdown",
+      description: "Relative paths are resolved from the current project.",
+      value: data.exportPath,
+      placeholder: "session-retros/retro.md",
+    });
+    if (requested === undefined) return;
+    try {
+      const path = resolveMarkdownExportPath(requested, projectDir);
+      if (await Bun.file(path).exists()) {
+        const overwrite = await props.context.ui.dialog.confirm({
+          title: "Overwrite existing file?",
+          message: props.context.ui.format.path(path),
+          label: { confirm: "Overwrite", cancel: "Cancel" },
+        });
+        if (!overwrite) return;
+      }
+      await writeMarkdownExport(path, data.report);
+      toast(`Exported to ${props.context.ui.format.path(path)}`, "success");
+    } catch (error) {
+      toast(`Export failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  };
 
   props.context.keymap.layer(() => ({
     commands: [
       { bind: "escape", title: "Close session retro", group: "Session retro", run: close },
+      { bind: "e", title: "Export Markdown", group: "Session retro", enabled: data?.exportPath !== undefined, run: exportReport },
       { bind: "up,k", title: "Scroll up", group: "Session retro", run: () => scroll?.scrollBy(-1) },
       { bind: "down,j", title: "Scroll down", group: "Session retro", run: () => scroll?.scrollBy(1) },
       { bind: "pageup", title: "Previous page", group: "Session retro", run: () => scroll?.scrollBy(-1, "viewport") },
@@ -42,7 +73,7 @@ function ReportPage(props: { context: Plugin.Context; data?: Record<string, any>
       <box flexShrink={0} paddingTop={1} paddingBottom={1} paddingLeft={2} paddingRight={2} flexDirection="row">
         <text fg={theme.text.default}>{data?.title ?? "Session retro"}</text>
         <box flexGrow={1} />
-        <text fg={theme.text.subdued}>esc back</text>
+        <text fg={theme.text.subdued}>{data?.exportPath ? "e export · esc back" : "esc back"}</text>
       </box>
       <scrollbox
         ref={(element: ScrollBoxRenderable) => (scroll = element)}
@@ -62,7 +93,9 @@ function ReportPage(props: { context: Plugin.Context; data?: Record<string, any>
         </box>
       </scrollbox>
       <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-        <text fg={theme.text.subdued}>↑/↓ or j/k scroll · pgup/pgdn page · home/end jump · esc back</text>
+        <text fg={theme.text.subdued}>
+          ↑/↓ or j/k scroll · pgup/pgdn page · home/end jump{data?.exportPath ? " · e export" : ""} · esc back
+        </text>
       </box>
     </box>
   );
@@ -96,12 +129,12 @@ export default Plugin.define({
       return { type: "plugin", id: route.id, name: route.name, ...(route.data ? { data: { ...route.data } } : {}) };
     }
 
-    function showReport(title: string, report: string, sessionID: string | undefined, previous: Route) {
+    function showReport(title: string, report: string, sessionID: string | undefined, previous: Route, exportPath?: string) {
       context.ui.dialog.clear();
       context.ui.router.navigate({
         type: "plugin",
         name: REPORT_ROUTE,
-        data: { title, report, sessionID, returnRoute: previous } satisfies ReportPageData,
+        data: { title, report, sessionID, exportPath, returnRoute: previous } satisfies ReportPageData,
       });
     }
 
@@ -166,7 +199,7 @@ export default Plugin.define({
         .then((raw) => {
           const r = raw as RunResult;
           toast(`Retro done: ${r.findings} finding${r.findings === 1 ? "" : "s"}.`, "success");
-          showReport("Session retro", r.report, id, previous);
+          showReport("Session retro", r.report, id, previous, defaultRetroExportPath(r.runID, r.ranAt));
         })
         .catch(fail("Retro"));
     }

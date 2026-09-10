@@ -116,6 +116,7 @@ describe("db", () => {
     db.insertFriction({ sessionId: "s1", turnId: t, source: "llm", type: "user_correction", severity: "high", evidence: "e", rootCause: "r", fixTarget: "agents_md", fixSuggestion: "do x", runId: run });
     expect(db.frictionForSession("s1")).toHaveLength(2);
     expect(db.latestRun("s1")?.id).toBe(run);
+    expect(db.run(run)?.session_id).toBe("s1");
     expect(db.frictionForRun(run)).toHaveLength(1);
 
     db.setPolicy("/p", "always");

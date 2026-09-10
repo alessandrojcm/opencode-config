@@ -37,10 +37,11 @@ export const SessionRetro = Rpc.define({
         type: "object",
         properties: {
           runID: { type: "string" },
+          ranAt: { type: "number" },
           findings: { type: "number" },
           report: { type: "string" },
         },
-        required: ["runID", "findings", "report"],
+        required: ["runID", "ranAt", "findings", "report"],
         additionalProperties: false,
       },
       errors: {

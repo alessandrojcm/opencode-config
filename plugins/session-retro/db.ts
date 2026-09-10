@@ -481,6 +481,10 @@ export async function openDb(path: string, options: { readonly?: boolean } = {})
       );
     },
 
+    run(id: string): RunRow | undefined {
+      return raw.query<RunRow, [string]>(`select * from retro_run where id = ?`).get(id) ?? undefined;
+    },
+
     setPolicy(projectDir: string, policy: "always" | "never" | "ask") {
       if (policy === "ask") {
         raw.query(`delete from policy where project_dir = ?`).run(projectDir);
