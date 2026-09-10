@@ -38,7 +38,7 @@ storms, user corrections), persist it to SQLite, and expose it so the harness
     Tool state has **no timing**; durations must come from the
     `tool.hook("execute.before"/"execute.after")` pair, keyed by `Tool.CallID`.
 - Subagent sessions are ordinary sessions with `Session.Info.parentID` set.
-- Plugin layout `plugins/session-retro/{index.ts,tui.ts,rpc.ts}` under the
+- Plugin layout `plugins/session-retro/{index.ts,tui.tsx,rpc.ts}` under the
   global config dir is auto-discovered for both halves; no `opencode.json` entry
   is required except to pass options.
 - `ctx.generate.text({prompt, model?})` → `{text}`; no session, no tools, no
@@ -52,7 +52,7 @@ storms, user corrections), persist it to SQLite, and expose it so the harness
 ```
 plugins/session-retro/
   index.ts    server half (Effect plugin, like the other two in this repo)
-  tui.ts      CLI half: asks the user, never analyzes
+  tui.tsx     CLI half: asks the user and renders the report, never analyzes
   rpc.ts      shared contract
   db.ts       bun:sqlite schema + queries
   rules.ts    deterministic detectors
@@ -100,15 +100,16 @@ events:
 ```
 
 CLI command `/retro [pending|settings]`: default = `run` for the current session
-(resets timer and clears pending). The TUI calls the server RPC and shows the
-report in a dialog; it does not post a synthetic transcript message.
+(resets timer and clears pending). The TUI calls the server RPC and opens a
+scrollable report page in the main content area; it does not post a synthetic
+transcript message or trigger another model turn.
 
 Tool `retro_query` (namespace `retro`, codemode on): `{sql}` read-only SELECT
 against retro.db (reject anything not starting with `SELECT`/`WITH`; open the
 DB `readonly`). `retro_summary {sessionID?}` returns the latest `retro_run` +
 findings for a session.
 
-### TUI half (`tui.ts`)
+### TUI half (`tui.tsx`)
 
 ```
 pending: Set<sessionID>     (from retro.due + rpc pending() on connect)
@@ -257,8 +258,8 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
 - `/retro` is a CLI/TUI keymap slash command, not a server prompt command. The
   server's `session.synthetic({ resume: false })` admits an inbox item but does not
   guarantee immediate visible message content; this produced blank "Session retro"
-  rows in the transcript. The CLI now invokes the RPC and renders its report with
-  `ui.dialog.alert`, while `pending` and `settings` use the same direct UI path.
+  rows in the transcript. The CLI now invokes the RPC and renders its report on a
+  scrollable plugin page, while `pending` and `settings` use the same direct UI path.
 - TUI `keymap.layer()` uses Solid hooks and must be called from a rendered owner.
   The plugin mounts the global `/retro` layer through the `app` slot; calling it
   directly from `setup()` leaves the command unreachable.

@@ -1,3 +1,5 @@
+/** @jsxImportSource @opentui/solid */
+import type { ScrollBoxRenderable } from "@opentui/core";
 import { Plugin } from "@opencode-ai/plugin/tui";
 import { SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
 
@@ -5,8 +7,66 @@ type RunResult = { runID: string; findings: number; report: string };
 type SettingsResult = { projectDir: string; policy: Policy; idleMinutes: number; dbPath: string };
 
 type Choice = "run" | "skip" | "later" | "always" | "never";
+type Route = ReturnType<Plugin.Context["ui"]["router"]["current"]>;
+type ReportPageData = {
+  title: string;
+  report: string;
+  sessionID?: string;
+  returnRoute: Route;
+};
 
 const ASK_GRACE_MS = 2_000;
+const REPORT_ROUTE = "session-retro-report";
+
+function ReportPage(props: { context: Plugin.Context; data?: Record<string, any> }) {
+  const theme = props.context.theme;
+  const data = props.data as ReportPageData | undefined;
+  let scroll: ScrollBoxRenderable | undefined;
+
+  const close = () => props.context.ui.router.navigate(data?.returnRoute ?? { type: "home" });
+
+  props.context.keymap.layer(() => ({
+    commands: [
+      { bind: "escape", title: "Close session retro", group: "Session retro", run: close },
+      { bind: "up,k", title: "Scroll up", group: "Session retro", run: () => scroll?.scrollBy(-1) },
+      { bind: "down,j", title: "Scroll down", group: "Session retro", run: () => scroll?.scrollBy(1) },
+      { bind: "pageup", title: "Previous page", group: "Session retro", run: () => scroll?.scrollBy(-1, "viewport") },
+      { bind: "pagedown", title: "Next page", group: "Session retro", run: () => scroll?.scrollBy(1, "viewport") },
+      { bind: "home", title: "Start of report", group: "Session retro", run: () => scroll?.scrollTo(0) },
+      { bind: "end", title: "End of report", group: "Session retro", run: () => scroll?.scrollTo(Number.MAX_SAFE_INTEGER) },
+    ],
+  }));
+
+  return (
+    <box width="100%" height="100%" minHeight={0} flexDirection="column" backgroundColor={theme.background.default}>
+      <box flexShrink={0} paddingTop={1} paddingBottom={1} paddingLeft={2} paddingRight={2} flexDirection="row">
+        <text fg={theme.text.default}>{data?.title ?? "Session retro"}</text>
+        <box flexGrow={1} />
+        <text fg={theme.text.subdued}>esc back</text>
+      </box>
+      <scrollbox
+        ref={(element: ScrollBoxRenderable) => (scroll = element)}
+        flexGrow={1}
+        minHeight={0}
+        scrollX={false}
+        scrollY={true}
+        stickyScroll={false}
+        viewportOptions={{ paddingRight: 1 }}
+        verticalScrollbarOptions={{ visible: true, showArrows: true }}
+        horizontalScrollbarOptions={{ visible: false }}
+      >
+        <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="column">
+          <text fg={theme.text.default} wrapMode="word" selectable={true}>
+            {data?.report ?? "No retro report is available."}
+          </text>
+        </box>
+      </scrollbox>
+      <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+        <text fg={theme.text.subdued}>↑/↓ or j/k scroll · pgup/pgdn page · home/end jump · esc back</text>
+      </box>
+    </box>
+  );
+}
 
 export default Plugin.define({
   id: "session-retro-tui",
@@ -24,6 +84,26 @@ export default Plugin.define({
     const fail = (what: string) => (e: unknown) => {
       toast(`${what} failed: ${e instanceof Error ? e.message : String(e)}`, "error");
     };
+
+    function returnRoute(): Route {
+      const route = context.ui.router.current();
+      if (route.type === "plugin" && route.name === REPORT_ROUTE) {
+        const previous = (route.data as Partial<ReportPageData> | undefined)?.returnRoute;
+        if (previous) return previous;
+      }
+      if (route.type === "home") return { type: "home" };
+      if (route.type === "session") return { type: "session", sessionID: route.sessionID };
+      return { type: "plugin", id: route.id, name: route.name, ...(route.data ? { data: { ...route.data } } : {}) };
+    }
+
+    function showReport(title: string, report: string, sessionID: string | undefined, previous: Route) {
+      context.ui.dialog.clear();
+      context.ui.router.navigate({
+        type: "plugin",
+        name: REPORT_ROUTE,
+        data: { title, report, sessionID, returnRoute: previous } satisfies ReportPageData,
+      });
+    }
 
     function showable(): boolean {
       const route = context.ui.router.current();
@@ -79,30 +159,34 @@ export default Plugin.define({
     }
 
     async function runRetro(id: string) {
+      const previous = returnRoute();
       toast("Running retro…");
       await rpc
         .run({ sessionID: id })
-        .then(async (raw) => {
+        .then((raw) => {
           const r = raw as RunResult;
           toast(`Retro done: ${r.findings} finding${r.findings === 1 ? "" : "s"}.`, "success");
-          await context.ui.dialog.alert({ title: "Session retro", message: r.report });
+          showReport("Session retro", r.report, id, previous);
         })
         .catch(fail("Retro"));
     }
 
     function currentSessionID(): string | undefined {
       const route = context.ui.router.current();
-      return route.type === "session" ? route.sessionID : undefined;
+      if (route.type === "session") return route.sessionID;
+      if (route.type === "plugin" && route.name === REPORT_ROUTE) return (route.data as Partial<ReportPageData> | undefined)?.sessionID;
+      return undefined;
     }
 
     async function runCommand(input?: string) {
       const arg = (input ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
       if (arg === "pending") {
+        const previous = returnRoute();
         const raw = (await rpc.pending({})) as { sessions: PendingSession[] };
         const message = raw.sessions.length
           ? raw.sessions.map((s) => `• ${s.title} (${s.sessionID})\n  ${s.turns} turns · ${s.projectDir}`).join("\n\n")
           : "No sessions with a pending retro.";
-        await context.ui.dialog.alert({ title: "Pending retros", message });
+        showReport("Pending retros", message, currentSessionID(), previous);
         return;
       }
 
@@ -112,11 +196,14 @@ export default Plugin.define({
         return;
       }
       if (arg === "settings") {
+        const previous = returnRoute();
         const settings = (await rpc.settings({ sessionID })) as SettingsResult;
-        await context.ui.dialog.alert({
-          title: "Session retro settings",
-          message: `Project: ${settings.projectDir}\nPolicy: ${settings.policy}\nIdle minutes: ${settings.idleMinutes}\nDatabase: ${settings.dbPath}`,
-        });
+        showReport(
+          "Session retro settings",
+          `Project: ${settings.projectDir}\nPolicy: ${settings.policy}\nIdle minutes: ${settings.idleMinutes}\nDatabase: ${settings.dbPath}`,
+          sessionID,
+          previous,
+        );
         return;
       }
       await runRetro(sessionID);
@@ -125,6 +212,10 @@ export default Plugin.define({
     // Keymap layers are Solid-owned: register from a rendered slot rather than setup(),
     // which runs outside a component owner and silently leaves the command unreachable.
     cleanups.push(
+      context.ui.router.register({
+        name: REPORT_ROUTE,
+        render: (input) => <ReportPage context={context} data={input.data} />,
+      }),
       context.ui.slot({
         append: "app",
         render: () => {
