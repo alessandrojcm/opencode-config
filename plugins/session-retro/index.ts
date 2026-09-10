@@ -3,7 +3,7 @@ import type { Session } from "@opencode-ai/schema/session";
 import { Cause, Effect, FiberMap, Schema, Stream } from "effect";
 import { buildPrompt, compressTranscript, parseAnalysis, type ContextMessage, type RuleHint } from "./analyze.ts";
 import { openDb, type Db, type Outcome } from "./db.ts";
-import { POLICIES, SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
+import { SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
 import { formatRetroReport, type ReportFinding } from "./report.ts";
 import { detect, hashInput, summarizeInput } from "./rules.ts";
 
@@ -30,6 +30,17 @@ type SessionState = {
 };
 
 type PendingRecord = { title: string; projectDir: string; dueAt: number };
+type EventData = {
+  sessionID: string;
+  parentID?: string;
+  location?: { directory?: string };
+  agent?: string;
+  model?: { providerID: string; id: string };
+  title?: string;
+  tokens?: { input?: number; output?: number; reasoning?: number };
+  cost?: number;
+};
+type RetroEvent = { type: string; location?: { directory: string }; data: EventData };
 
 const PENDING_PREFIX = "pending/";
 
@@ -41,7 +52,7 @@ function defaultDbPath(): string {
 
 function errorMessage(cause: unknown): string {
   if (cause instanceof Error) return cause.message;
-  return typeof cause === "string" ? cause : JSON.stringify(cause);
+  return Schema.is(Schema.String)(cause) ? cause : JSON.stringify(cause);
 }
 
 const QueryInput = Schema.Struct({
@@ -62,12 +73,14 @@ export default Plugin.define({
   id: "session-retro",
   effect: (ctx) =>
     Effect.gen(function* () {
+      // SAFETY: OpenCode validates plugin options from opencode.json before plugin setup.
       const options = ctx.options as Options;
-      const idleMinutes = typeof options.idleMinutes === "number" && options.idleMinutes > 0 ? options.idleMinutes : 30;
+      const isNumber = Schema.is(Schema.Number);
+      const idleMinutes = isNumber(options.idleMinutes) && options.idleMinutes > 0 ? options.idleMinutes : 30;
       const idleMs = idleMinutes * 60_000;
       const includeSubagents = options.includeSubagents !== false;
       const analysisTimeoutMs =
-        (typeof options.analysisTimeoutSeconds === "number" && options.analysisTimeoutSeconds > 0 ? options.analysisTimeoutSeconds : 180) * 1000;
+        (isNumber(options.analysisTimeoutSeconds) && options.analysisTimeoutSeconds > 0 ? options.analysisTimeoutSeconds : 180) * 1000;
       const dbPath = options.dbPath && options.dbPath.length > 0 ? options.dbPath : defaultDbPath();
 
       const db: Db = yield* Effect.acquireRelease(
@@ -119,6 +132,7 @@ export default Plugin.define({
               Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logWarning(`session-retro: ${label} failed`, Cause.pretty(cause)),
             ),
           );
+      // SAFETY: Session.ID is a branded string and OpenCode session ids are passed through unchanged.
       const sid = (id: string) => id as Session.ID;
 
       // ---------- session bookkeeping ----------
@@ -163,7 +177,12 @@ export default Plugin.define({
       const setPending = (sessionID: string, record: PendingRecord) => ctx.storage.set(`${PENDING_PREFIX}${sessionID}`, record);
       const clearPending = (sessionID: string) => ctx.storage.remove(`${PENDING_PREFIX}${sessionID}`);
       const getPending = (sessionID: string) =>
-        ctx.storage.get(`${PENDING_PREFIX}${sessionID}`).pipe(Effect.map((v) => (v as PendingRecord | undefined) ?? undefined));
+        ctx.storage.get(`${PENDING_PREFIX}${sessionID}`).pipe(
+          Effect.map((value) => {
+            // SAFETY: these records are only written above by setPending with the PendingRecord contract.
+            return (value as PendingRecord | undefined) ?? undefined;
+          }),
+        );
 
       const listPending = Effect.gen(function* () {
         const out: PendingSession[] = [];
@@ -172,6 +191,7 @@ export default Plugin.define({
           const page = yield* ctx.storage.scan({ prefix: PENDING_PREFIX, after, limit: 200 });
           for (const entry of page.entries) {
             const sessionID = entry.key.slice(PENDING_PREFIX.length);
+            // SAFETY: all entries under PENDING_PREFIX are written by setPending with this contract.
             const rec = entry.value as PendingRecord;
             out.push({
               sessionID,
@@ -202,7 +222,8 @@ export default Plugin.define({
           if (waited._tag === "None") return yield* Effect.fail(new Error("session is still running; retro not started"));
         }
         const messages = yield* ctx.session.context({ sessionID: sid(sessionID) });
-        const transcript = compressTranscript(messages as unknown as ReadonlyArray<ContextMessage>);
+        // SAFETY: session.context returns OpenCode context messages; transcript compression only consumes its documented variants.
+        const transcript = compressTranscript(messages as ReadonlyArray<ContextMessage>);
         const turns = db.turnsForSession(sessionID);
         const turnIndex = new Map(turns.map((t) => [t.id, t.idx + 1]));
         const hints: RuleHint[] = db.ruleFrictionForSession(sessionID).map((f) => ({
@@ -219,8 +240,11 @@ export default Plugin.define({
             ? ({ providerID: info.model.providerID, id: info.model.id } as const)
             : undefined;
         const modelLabel = modelRef ? `${modelRef.providerID}/${modelRef.id}` : "default";
+        // SAFETY: modelRef comes from validated plugin options or the active OpenCode session model;
+        // the SDK's generated model parameter is not exported by the Effect plugin facade.
+        const generateInput = modelRef ? { prompt, model: modelRef as never } : { prompt };
         const result = yield* ctx.generate
-          .text(modelRef ? { prompt, model: modelRef as never } : { prompt })
+          .text(generateInput)
           .pipe(
             Effect.timeoutOption(analysisTimeoutMs),
             Effect.flatMap((r) =>
@@ -363,12 +387,14 @@ export default Plugin.define({
           const turnId = liveTurn(event.sessionID) ?? db.openTurn(event.sessionID, t0 ?? Date.now());
           s.turnId = turnId;
           s.agent = event.agent;
+          // SAFETY: OpenCode tool inputs are JSON-serializable values by the tool-call contract.
+          const input = event.input as import("./rules.ts").JsonValue;
           db.insertToolCall({
             id: event.id,
             turnId,
             tool: event.tool,
-            inputHash: hashInput(event.input),
-            inputSummary: summarizeInput(event.tool, event.input),
+            inputHash: hashInput(input),
+            inputSummary: summarizeInput(event.tool, input),
             durationMs: t0 === undefined ? null : Date.now() - t0,
             status: event.status,
             error: event.status === "error" ? event.error.message : undefined,
@@ -389,16 +415,16 @@ export default Plugin.define({
       // The plugin is instantiated once per location and every instance sees the global event
       // stream. Only the instance whose location owns the session records it, so counters and
       // idle timers are not multiplied by the number of open projects.
-      const ownsEvent = (event: { location?: { directory: string }; data: unknown }): boolean => {
-        const data = event.data as Record<string, any>;
+      const ownsEvent = (event: RetroEvent): boolean => {
+        const data = event.data;
         const dir = event.location?.directory ?? data?.location?.directory ?? (data?.sessionID ? db.session(data.sessionID)?.project_dir : undefined);
         return dir === undefined ? false : dir === here;
       };
 
-      const handleEvent = (event: { type: string; location?: { directory: string }; data: unknown }) =>
+      const handleEvent = (event: RetroEvent) =>
         Effect.gen(function* () {
           if (!ownsEvent(event)) return;
-          const data = event.data as Record<string, any>;
+          const data = event.data;
           switch (event.type) {
             case "session.created": {
               if (!includeSubagents && data.parentID) {
@@ -488,7 +514,10 @@ export default Plugin.define({
       yield* ctx.event
         .subscribe()
         .pipe(
-          Stream.runForEach((event) => handleEvent(event as { type: string; location?: { directory: string }; data: unknown })),
+          Stream.runForEach((event) => {
+            // SAFETY: OpenCode emits documented event objects; the fields consumed by RetroEvent are event payload fields.
+            return handleEvent(event as RetroEvent);
+          }),
           swallow("event stream"),
           Effect.forkScoped,
         );
@@ -498,6 +527,7 @@ export default Plugin.define({
       const registration = yield* ctx.rpc.register(SessionRetro, {
         run: (input, call) =>
           Effect.gen(function* () {
+            // SAFETY: SessionRetro validates RPC input against the run schema.
             const { sessionID } = input as { sessionID: string };
             yield* cancelIdleTimer(sessionID);
             yield* clearPending(sessionID);
@@ -513,6 +543,7 @@ export default Plugin.define({
           }),
         skip: (input) =>
           Effect.gen(function* () {
+            // SAFETY: SessionRetro validates RPC input against the skip schema.
             const { sessionID } = input as { sessionID: string };
             yield* cancelIdleTimer(sessionID);
             yield* clearPending(sessionID);
@@ -520,20 +551,22 @@ export default Plugin.define({
           }),
         later: (input) =>
           Effect.gen(function* () {
+            // SAFETY: SessionRetro validates RPC input against the later schema.
             const { sessionID } = input as { sessionID: string };
             yield* startIdleTimer(sessionID);
             return {};
           }),
         policy: (input) =>
           Effect.sync(() => {
-            const { projectDir, policy } = input as { projectDir: string; policy: string };
-            if (!POLICIES.includes(policy as Policy)) return {};
-            db.setPolicy(projectDir, policy as Policy);
+            // SAFETY: SessionRetro validates RPC input against the policy schema and enum.
+            const { projectDir, policy } = input as { projectDir: string; policy: Policy };
+            db.setPolicy(projectDir, policy);
             return {};
           }),
         pending: () => listPending.pipe(Effect.map((sessions) => ({ sessions }))),
         settings: (input) =>
           Effect.sync(() => {
+            // SAFETY: SessionRetro validates RPC input against the settings schema.
             const { sessionID } = input as { sessionID: string };
             const projectDir = db.session(sessionID)?.project_dir ?? ctx.location.directory;
             return { projectDir, policy: policyFor(projectDir), idleMinutes, dbPath };

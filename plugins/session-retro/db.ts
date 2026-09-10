@@ -4,6 +4,9 @@ export type Outcome = "succeeded" | "failed" | "interrupted";
 export type Severity = "low" | "medium" | "high";
 export type FrictionSource = "rule" | "llm";
 export type FixTarget = "agents_md" | "skill" | "prompt" | "permission" | "plugin" | "tool" | "none";
+/** Values SQLite can return from an ad-hoc read-only query. */
+export type SqlValue = string | number | bigint | Uint8Array | null;
+export type SqlResultRow = { readonly [column: string]: SqlValue };
 
 export type SessionRow = {
   id: string;
@@ -502,10 +505,10 @@ export async function openDb(path: string, options: { readonly?: boolean } = {})
       );
     },
 
-    readonlyQuery(sql: string): Record<string, unknown>[] {
+    readonlyQuery(sql: string): SqlResultRow[] {
       if (!READONLY.test(sql)) throw new Error("Only SELECT / WITH statements are allowed");
       if (sql.trim().replace(/;\s*$/, "").includes(";")) throw new Error("Only a single statement is allowed");
-      return raw.query<Record<string, unknown>, []>(sql).all();
+      return raw.query<SqlResultRow, []>(sql).all();
     },
   };
 

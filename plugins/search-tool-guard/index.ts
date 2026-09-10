@@ -1,20 +1,22 @@
 import { Plugin } from "@opencode-ai/plugin/effect";
 import { Effect } from "effect";
 
-const GUIDANCE: Record<string, string> = {
+const GUIDANCE = {
   "ast-grep":
     "Use the astgrep_pattern tool for a single code shape, or astgrep_rule for relational/composite structural search. Do not shell out to ast-grep.",
   sg: "Use the astgrep_pattern tool for a single code shape, or astgrep_rule for relational/composite structural search. Do not shell out to ast-grep/sg.",
-};
+} satisfies Record<string, string>;
 
 const BLOCKED_AST_GREP_COMMAND = /(?:^|[;&|]\s*)(ast-grep|sg)\b/;
+type BlockedCommand = keyof typeof GUIDANCE;
 
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `"'"'`)}'`;
 }
 
-function blockedCommand(command: string): string | undefined {
-  return command.match(BLOCKED_AST_GREP_COMMAND)?.[1];
+function blockedCommand(command: string): BlockedCommand | undefined {
+  const candidate = command.match(BLOCKED_AST_GREP_COMMAND)?.[1];
+  return candidate === "ast-grep" || candidate === "sg" ? candidate : undefined;
 }
 
 export default Plugin.define({
@@ -26,8 +28,7 @@ export default Plugin.define({
           const blocked = blockedCommand(event.command);
           if (!blocked) return;
 
-          const guidance = GUIDANCE[blocked] ??
-            "Use the dedicated code/search tools instead of shelling out.";
+          const guidance = GUIDANCE[blocked];
           const message = [
             `Blocked direct shell search command: ${blocked}`,
             guidance,

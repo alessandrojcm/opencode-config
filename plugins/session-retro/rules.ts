@@ -1,4 +1,10 @@
+import { Schema } from "effect";
 import type { FixTarget, Severity, ToolCallRow, TurnRow } from "./db.ts";
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | { readonly [key: string]: JsonValue };
+
+const isJsonRecord = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
+const isString = Schema.is(Schema.String);
 
 export type RuleFinding = {
   type:
@@ -134,19 +140,21 @@ export function detect(turn: TurnRow, calls: ToolCallRow[], ctx: RuleContext): R
   return out;
 }
 
-function canonical(value: unknown): unknown {
+function canonical(value: JsonValue): JsonValue {
   if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") {
+  if (isJsonRecord(value)) {
+    // SAFETY: value is a JsonValue object after excluding arrays, and every property is therefore JsonValue.
+    const record = value as { readonly [key: string]: JsonValue };
     return Object.fromEntries(
-      Object.keys(value as Record<string, unknown>)
+      Object.keys(record)
         .sort()
-        .map((k) => [k, canonical((value as Record<string, unknown>)[k])]),
-    );
+        .map((key) => [key, canonical(record[key]!)]),
+    ) satisfies { readonly [key: string]: JsonValue };
   }
   return value;
 }
 
-export function hashInput(input: unknown): string {
+export function hashInput(input: JsonValue): string {
   return new Bun.CryptoHasher("sha1")
     .update(JSON.stringify(canonical(input)) ?? "undefined")
     .digest("hex")
@@ -157,13 +165,15 @@ const SUMMARY_KEYS = ["command", "path", "filePath", "file", "pattern", "query",
 // Long enough that shell_for_search sees the whole command in almost every case.
 const MAX_SUMMARY = 1000;
 
-export function summarizeInput(_tool: string, input: unknown): string {
+export function summarizeInput(_tool: string, input: JsonValue): string {
   let text: string;
-  if (typeof input === "string") text = input;
-  else if (input && typeof input === "object") {
-    const obj = input as Record<string, unknown>;
-    const key = SUMMARY_KEYS.find((k) => typeof obj[k] === "string");
-    text = key ? (obj[key] as string) : JSON.stringify(obj);
+  if (isString(input)) {
+    text = input;
+  } else if (isJsonRecord(input)) {
+    // SAFETY: input is a JsonValue object after excluding strings, and every property is therefore JsonValue.
+    const record = input as { readonly [key: string]: JsonValue };
+    const candidate = SUMMARY_KEYS.map((key) => record[key]).find(isString);
+    text = candidate ?? JSON.stringify(input);
   } else text = String(input);
   text = text.replace(/\s+/g, " ").trim();
   return text.length > MAX_SUMMARY ? `${text.slice(0, MAX_SUMMARY - 1)}…` : text;

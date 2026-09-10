@@ -266,7 +266,7 @@ export default Plugin.define({
           description: patternDescription,
           input: PatternInput,
           options: { codemode: true },
-          execute: ({ pattern, lang, path }, tool) =>
+          execute: ({ pattern, lang, path }) =>
             Effect.gen(function* () {
               const cwd = sessionDirectory;
               const target = path && path.length > 0 ? path : cwd;
@@ -286,7 +286,7 @@ export default Plugin.define({
           description: replaceDescription,
           input: ReplaceInput,
           options: { codemode: true },
-          execute: ({ pattern, rewrite, lang, path, apply }, tool) =>
+          execute: ({ pattern, rewrite, lang, path, apply }) =>
             Effect.gen(function* () {
               const cwd = sessionDirectory;
               const target = path && path.length > 0 ? path : cwd;
@@ -316,7 +316,7 @@ export default Plugin.define({
           description: debugDescription,
           input: DebugPatternInput,
           options: { codemode: true },
-          execute: ({ pattern, lang, format, selector }, tool) =>
+          execute: ({ pattern, lang, format, selector }) =>
             Effect.gen(function* () {
               const cwd = sessionDirectory;
               const resolvedFormat = format ?? "cst";
@@ -335,7 +335,7 @@ export default Plugin.define({
           description: testPatternDescription,
           input: TestPatternInput,
           options: { codemode: true },
-          execute: ({ pattern, lang, code }, tool) =>
+          execute: ({ pattern, lang, code }) =>
             Effect.gen(function* () {
               const cwd = sessionDirectory;
               const output = yield* runAstGrepOnSnippet(
@@ -356,7 +356,7 @@ export default Plugin.define({
           description: testRuleDescription,
           input: TestRuleInput,
           options: { codemode: true },
-          execute: ({ rule, lang, code }, tool) =>
+          execute: ({ rule, lang, code }) =>
             Effect.gen(function* () {
               const cwd = sessionDirectory;
               const fullRule = fullRuleFor(lang, rule);
@@ -378,7 +378,7 @@ export default Plugin.define({
           description: ruleDescription,
           input: RuleInput,
           options: { codemode: true },
-          execute: ({ rule, lang, path }, tool) =>
+          execute: ({ rule, lang, path }) =>
             Effect.gen(function* () {
               const cwd = sessionDirectory;
               const target = path && path.length > 0 ? path : cwd;

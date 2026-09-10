@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildPrompt, compressTranscript, FINDING_TYPES, outputShapeBlock, parseAnalysis } from "./analyze.ts";
+import { buildPrompt, compressTranscript, FINDING_TYPES, outputContractBlock, parseAnalysis, type ContextMessage } from "./analyze.ts";
 
 const messages = [
   { id: "u1", type: "user", time: { created: 1 }, text: "please fix the build" },
@@ -32,11 +32,11 @@ const messages = [
   { id: "u2", type: "user", time: { created: 5 }, text: "no, I said the *build*, not tests" },
   { id: "syn", type: "synthetic", time: { created: 6 }, text: "retro summary", metadata: { sessionRetro: true } },
   { id: "a2", type: "assistant", time: { created: 7 }, agent: "build", model: { providerID: "p", id: "m" }, finish: "stop", content: [{ type: "text", text: "Done." }] },
-] as const;
+] satisfies ReadonlyArray<ContextMessage>;
 
 describe("compressTranscript", () => {
   test("keeps user/assistant text and one line per tool, drops reasoning, outputs and retro messages", () => {
-    const out = compressTranscript(messages as any);
+    const out = compressTranscript(messages);
     expect(out).toContain("[turn 1] USER: please fix the build");
     expect(out).toContain("ASSISTANT: Looking.");
     expect(out).toContain("#1 shell completed make");
@@ -62,18 +62,18 @@ describe("buildPrompt", () => {
     expect(p.startsWith("Custom intro.")).toBe(true);
     expect(p).toContain("- turn 2: blocked — waited");
     expect(p).toContain("---\nT-BODY\n---");
-    expect(p).toContain(outputShapeBlock());
+    expect(p).toContain(outputContractBlock());
     expect(p).not.toContain("{{");
   });
 
   test("custom template without a transcript placeholder still gets the transcript", () => {
     const p = buildPrompt("T-BODY", [], "Just instructions.");
     expect(p).toContain("T-BODY");
-    expect(p).toContain(outputShapeBlock());
+    expect(p).toContain(outputContractBlock());
   });
 
-  test("output shape block lists every enum value the parser accepts", () => {
-    const block = outputShapeBlock();
+  test("output contract block lists every enum value the parser accepts", () => {
+    const block = outputContractBlock();
     for (const t of FINDING_TYPES) expect(block).toContain(t);
     for (const t of ["agents_md", "skill", "prompt", "permission", "plugin", "tool", "none"]) expect(block).toContain(t);
     for (const s of ["low", "medium", "high"]) expect(block).toContain(s);
@@ -118,8 +118,8 @@ describe("parseAnalysis", () => {
 
 describe("compressTranscript budget", () => {
   test("drops oldest turns first and marks the omission", () => {
-    const msgs = Array.from({ length: 6 }, (_, i) => ({ id: `u${i}`, type: "user", time: { created: i }, text: `turn ${i + 1} ` + "x".repeat(400) }));
-    const out = compressTranscript(msgs as any, 1200);
+    const msgs: ContextMessage[] = Array.from({ length: 6 }, (_, i) => ({ type: "user", text: `turn ${i + 1} ` + "x".repeat(400) }));
+    const out = compressTranscript(msgs, 1200);
     expect(out).toMatch(/^\(\d earlier turns omitted/);
     expect(out).not.toContain("[turn 1]");
     expect(out).toContain("[turn 6]");

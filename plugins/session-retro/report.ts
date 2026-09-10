@@ -27,7 +27,7 @@ function code(value: string): string {
 }
 
 function markdownText(value: string): string {
-  return value.replace(/([\\`*_{}\[\]<>#+.!|])/g, "\\$1").replace(/\r?\n/g, "  \n");
+  return value.replace(/([\\`*_{}[\]<>#+.!|])/g, "\\$1").replace(/\r?\n/g, "  \n");
 }
 
 function sqlString(value: string): string {

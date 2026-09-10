@@ -1,6 +1,6 @@
 import { Result, Schema } from "effect";
 import type { FixTarget, Severity } from "./db.ts";
-import { summarizeInput } from "./rules.ts";
+import { summarizeInput, type JsonValue } from "./rules.ts";
 
 export const FINDING_TYPES = [
   "user_correction",
@@ -18,7 +18,7 @@ const TARGETS = ["agents_md", "skill", "prompt", "permission", "plugin", "tool",
 
 /**
  * Single source of truth for the LLM output shape. `parseAnalysis` decodes against it and
- * `outputShapeBlock()` renders it into the prompt, so enum values cannot drift between the two.
+ * `outputContractBlock()` renders it into the prompt, so enum values cannot drift between the two.
  * (ctx.generate.text has no structured-output mode in the current SDK; this is the parser-side equivalent.)
  */
 export const LlmFinding = Schema.Struct({
@@ -37,7 +37,7 @@ export type Analysis = typeof Analysis.Type;
 const decodeAnalysis = Schema.decodeUnknownResult(Analysis);
 
 /** JSON skeleton shown to the model, derived from the same enum lists the schema uses. */
-export function outputShapeBlock(): string {
+export function outputContractBlock(): string {
   return `{"findings":[{"type":"${FINDING_TYPES.join("|")}",
   "turn":3,"severity":"${SEVERITIES.join("|")}","evidence":"…","root_cause":"…",
   "harness_fix":{"target":"${TARGETS.join("|")}","suggestion":"…"}}],
@@ -54,14 +54,13 @@ type ToolContent = {
   type: "tool";
   id: string;
   name: string;
-  state: { status: string; input?: unknown; error?: { message?: string } };
+  state: { status: string; input?: JsonValue; error?: { message?: string } };
 };
 type AssistantContent = { type: "text"; text: string } | { type: "reasoning"; text: string } | ToolContent;
 export type ContextMessage =
-  | { type: "user"; text: string; metadata?: Record<string, unknown> }
+  | { type: "user"; text: string; metadata?: { sessionRetro?: boolean } }
   | { type: "assistant"; content: AssistantContent[]; finish?: string; error?: { type?: string; message?: string } }
-  | { type: "synthetic"; text: string; metadata?: Record<string, unknown> }
-  | { type: string; [k: string]: unknown };
+  | { type: "synthetic"; text: string; metadata?: { sessionRetro?: boolean } };
 
 const MAX_TEXT = 1500;
 /** Total transcript budget; older turns are dropped first so the most recent context survives. */
@@ -95,29 +94,27 @@ function transcriptLines(messages: ReadonlyArray<ContextMessage>): string[] {
   let call = 0;
   for (const m of messages) {
     if (m.type === "synthetic") {
-      const meta = (m as { metadata?: Record<string, unknown> }).metadata;
-      if (meta?.[RETRO_METADATA_KEY]) continue;
-      lines.push(`SYSTEM(synthetic): ${clip(String((m as { text: string }).text))}`);
+      if (m.metadata?.[RETRO_METADATA_KEY]) continue;
+      lines.push(`SYSTEM(synthetic): ${clip(m.text)}`);
       continue;
     }
     if (m.type === "user") {
       turn++;
       call = 0;
-      lines.push(`[turn ${turn}] USER: ${clip((m as { text: string }).text)}`);
+      lines.push(`[turn ${turn}] USER: ${clip(m.text)}`);
       continue;
     }
     if (m.type === "assistant") {
-      const a = m as Extract<ContextMessage, { type: "assistant" }>;
-      for (const c of a.content ?? []) {
+      for (const c of m.content) {
         if (c.type === "text" && c.text.trim()) lines.push(`ASSISTANT: ${clip(c.text)}`);
         else if (c.type === "tool") {
           call++;
-          const summary = summarizeInput(c.name, c.state?.input);
+          const summary = summarizeInput(c.name, c.state?.input ?? null);
           const err = c.state?.status === "error" && c.state.error?.message ? ` — ${clip(c.state.error.message, 200)}` : "";
           lines.push(`  #${call} ${c.name} ${c.state?.status ?? "unknown"} ${summary}${err}`);
         }
       }
-      if (a.finish === "error" && a.error) lines.push(`  (step ended with error: ${a.error.type ?? ""} ${clip(a.error.message ?? "", 200)})`);
+      if (m.finish === "error" && m.error) lines.push(`  (step ended with error: ${m.error.type ?? ""} ${clip(m.error.message ?? "", 200)})`);
     }
   }
   return lines;
@@ -165,7 +162,7 @@ export function buildPrompt(transcript: string, hints: RuleHint[], template: str
   return `${body}
 
 Respond with JSON only, no prose, matching exactly:
-${outputShapeBlock()}
+${outputContractBlock()}
 
 Only report findings with concrete evidence from the transcript. An empty findings array is a valid answer.`;
 }

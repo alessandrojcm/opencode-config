@@ -20,9 +20,9 @@ type ReportPageData = {
 const ASK_GRACE_MS = 2_000;
 const REPORT_ROUTE = "session-retro-report";
 
-function ReportPage(props: { context: Plugin.Context; data?: Record<string, any> }) {
+function ReportPage(props: { context: Plugin.Context; data?: ReportPageData }) {
   const theme = props.context.theme;
-  const data = props.data as ReportPageData | undefined;
+  const data = props.data;
   let scroll: ScrollBoxRenderable | undefined;
 
   const close = () => props.context.ui.router.navigate(data?.returnRoute ?? { type: "home" });
@@ -114,19 +114,20 @@ export default Plugin.define({
     const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") =>
       context.ui.toast.show({ title: "Session retro", message, variant });
 
-    const fail = (what: string) => (e: unknown) => {
+    const fail = (what: string) => (e: Error) => {
       toast(`${what} failed: ${e instanceof Error ? e.message : String(e)}`, "error");
     };
 
     function returnRoute(): Route {
       const route = context.ui.router.current();
       if (route.type === "plugin" && route.name === REPORT_ROUTE) {
+        // SAFETY: this route is created only by showReport(), which supplies ReportPageData.
         const previous = (route.data as Partial<ReportPageData> | undefined)?.returnRoute;
         if (previous) return previous;
       }
       if (route.type === "home") return { type: "home" };
       if (route.type === "session") return { type: "session", sessionID: route.sessionID };
-      return { type: "plugin", id: route.id, name: route.name, ...(route.data ? { data: { ...route.data } } : {}) };
+      return { ...route };
     }
 
     function showReport(title: string, report: string, sessionID: string | undefined, previous: Route, exportPath?: string) {
@@ -197,6 +198,7 @@ export default Plugin.define({
       await rpc
         .run({ sessionID: id })
         .then((raw) => {
+          // SAFETY: SessionRetro validates the RPC output against its declared run schema.
           const r = raw as RunResult;
           toast(`Retro done: ${r.findings} finding${r.findings === 1 ? "" : "s"}.`, "success");
           showReport("Session retro", r.report, id, previous, defaultRetroExportPath(r.runID, r.ranAt));
@@ -207,7 +209,10 @@ export default Plugin.define({
     function currentSessionID(): string | undefined {
       const route = context.ui.router.current();
       if (route.type === "session") return route.sessionID;
-      if (route.type === "plugin" && route.name === REPORT_ROUTE) return (route.data as Partial<ReportPageData> | undefined)?.sessionID;
+      if (route.type === "plugin" && route.name === REPORT_ROUTE) {
+        // SAFETY: this route is created only by showReport(), which supplies ReportPageData.
+        return (route.data as Partial<ReportPageData> | undefined)?.sessionID;
+      }
       return undefined;
     }
 
@@ -215,6 +220,7 @@ export default Plugin.define({
       const arg = (input ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
       if (arg === "pending") {
         const previous = returnRoute();
+        // SAFETY: SessionRetro validates the RPC output against its declared pending schema.
         const raw = (await rpc.pending({})) as { sessions: PendingSession[] };
         const message = raw.sessions.length
           ? raw.sessions.map((s) => `• ${s.title} (${s.sessionID})\n  ${s.turns} turns · ${s.projectDir}`).join("\n\n")
@@ -230,6 +236,7 @@ export default Plugin.define({
       }
       if (arg === "settings") {
         const previous = returnRoute();
+        // SAFETY: SessionRetro validates the RPC output against its declared settings schema.
         const settings = (await rpc.settings({ sessionID })) as SettingsResult;
         showReport(
           "Session retro settings",
@@ -247,7 +254,11 @@ export default Plugin.define({
     cleanups.push(
       context.ui.router.register({
         name: REPORT_ROUTE,
-        render: (input) => <ReportPage context={context} data={input.data} />,
+        render: (input) => {
+          // SAFETY: showReport is the sole producer of this named plugin route and always supplies ReportPageData.
+          const data = input.data as ReportPageData | undefined;
+          return <ReportPage context={context} data={data} />;
+        },
       }),
       context.ui.slot({
         append: "app",
@@ -302,7 +313,8 @@ export default Plugin.define({
 
     cleanups.push(
       rpc.events.on("due", (event) => {
-        const due = event.data as unknown as DueEvent;
+        // SAFETY: SessionRetro validates due event data against its declared event schema.
+        const due = event.data as DueEvent;
         pending.set(due.sessionID, due);
         drain();
       }),
@@ -333,6 +345,7 @@ export default Plugin.define({
     void rpc
       .pending({})
       .then((raw) => {
+        // SAFETY: SessionRetro validates the RPC output against its declared pending schema.
         const result = raw as { sessions: PendingSession[] };
         for (const s of result.sessions) {
           pending.set(s.sessionID, { sessionID: s.sessionID, title: s.title, projectDir: s.projectDir, turns: s.turns, idleMinutes: 0 });
