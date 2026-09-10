@@ -1,0 +1,17 @@
+node_modules
+package.json
+bun.lock
+.gitignore
+opencode.json
+tui.json
+AGENTS.md
+bench/*
+scripts/*
+commands/work-ticket.md
+.npmrc
+package-lock.json
+service*
+agent/
+cli.json
+.ghcontext
+toast-marketplace/
