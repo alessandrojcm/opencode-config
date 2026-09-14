@@ -1,4 +1,4 @@
-import { Rpc } from "@opencode-ai/plugin/rpc";
+import { Rpc } from "@opencode/plugin/rpc";
 
 const sessionInput = {
   type: "object",

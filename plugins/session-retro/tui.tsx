@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { SyntaxStyle, type RGBA, type ScrollBoxRenderable, type ThemeTokenStyle } from "@opentui/core";
-import { Plugin } from "@opencode-ai/plugin/tui";
+import { Plugin } from "@opencode/plugin/tui";
 import { onCleanup } from "solid-js";
 import { defaultRetroExportPath, resolveMarkdownExportPath, writeMarkdownExport } from "./report.ts";
 import { SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";

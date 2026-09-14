@@ -228,7 +228,7 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
   strict on shape (enum values, integer `turn`, required keys).
 - Extra `session.renamed`/`session.deleted` handling keeps titles fresh and drops
   timers/pending for deleted sessions.
-- TUI half imports `@opencode-ai/plugin/tui` (Promise API); there is no Effect
+- TUI half imports `@opencode/plugin/tui` (Promise API); there is no Effect
   entrypoint for CLI plugins.
 
 ## Implementation notes (review, 2026-09-09)

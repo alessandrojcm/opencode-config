@@ -1,4 +1,4 @@
-import { Plugin } from "@opencode-ai/plugin/effect";
+import { Plugin } from "@opencode/plugin/effect";
 import { Effect, Schema } from "effect";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

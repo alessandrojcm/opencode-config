@@ -1,5 +1,5 @@
-import { Plugin } from "@opencode-ai/plugin/effect";
-import type { Session } from "@opencode-ai/schema/session";
+import { Plugin } from "@opencode/plugin/effect";
+import type { Session } from "@opencode/schema/session";
 import { Cause, Effect, FiberMap, Schema, Stream } from "effect";
 import { buildPrompt, compressTranscript, parseAnalysis, type ContextMessage, type RuleHint } from "./analyze.ts";
 import { openDb, type Db, type Outcome } from "./db.ts";
