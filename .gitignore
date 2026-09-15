@@ -13,3 +13,6 @@ agent/
 cli.json
 .ghcontext
 toast-marketplace/
+# symlinks owned by `nono pull nolabs-ai/opencode` (pack store lives in ~/.config/nono/packages)
+plugins/nono-sandbox.ts
+skills/nono-sandbox

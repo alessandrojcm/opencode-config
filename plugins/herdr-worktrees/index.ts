@@ -1,7 +1,9 @@
 // Bridges OpenCode V2 worktrees with herdr workspaces.
 //
 // - OpenCode create  -> herdr `worktree.create` under the workspace that owns the source checkout,
-//                       so the worktree shows up as a child workspace. Nothing is launched in it.
+//                       so the worktree shows up as a child workspace. Nothing is launched in it
+//                       unless `options.sandbox.enabled`, in which case the workspace's root pane
+//                       runs a nono-sandboxed `opencode --standalone <worktree>` (shared DB/config).
 // - OpenCode remove  -> herdr `worktree.remove` (Git fallback when herdr no longer owns it).
 // - herdr remove     -> sessions living in that directory are interrupted and moved back to the
 //                       source checkout, then OpenCode's worktree inventory is refreshed.
@@ -21,8 +23,10 @@ import {
   isInside,
   makeTransport,
   parsePorcelain,
+  parseSandboxOptions,
   reachable,
   samePath,
+  sandboxCommand,
   toCreateParams,
   toEntries,
   workspaceForCheckout,
@@ -69,6 +73,17 @@ async function gitList(sourceDirectory: string): Promise<Entry[]> {
   return parsePorcelain(out.stdout);
 }
 
+/** Absolute path of the main repo's `.git` (what a linked worktree's `.git` file points into). */
+async function gitCommonDir(directory: string): Promise<string> {
+  const out = await git(directory, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!out.ok) throw new Error(out.stderr.trim() || "git rev-parse --git-common-dir failed");
+  return out.stdout.trim();
+}
+
+async function nonoAvailable(): Promise<boolean> {
+  return Bun.which("nono") !== null;
+}
+
 /** `Effect.tryPromise` wraps thrown errors in an UnknownError whose `cause` is the original. */
 function unwrap(error: unknown): unknown {
   let current = error;
@@ -102,10 +117,28 @@ export default Plugin.define({
       const herdr = makeTransport(socketPath);
       const here = ctx.location.directory;
       const books: Bookkeeping = { pendingRemoval: new Set(), sessionDirectory: new Map() };
+      // SAFETY: OpenCode validates plugin options from opencode.json before setup; parse defensively anyway.
+      const sandbox = parseSandboxOptions((ctx.options as { sandbox?: unknown } | undefined)?.sandbox);
+      if (sandbox.enabled && !(yield* Effect.promise(nonoAvailable))) {
+        yield* Effect.logWarning("herdr-worktrees: sandbox.enabled but `nono` is not on PATH; worktrees will be created without a sandbox");
+        sandbox.enabled = false;
+      }
 
       // Only the plugin instance whose location *is* the source checkout reacts to a herdr removal;
       // instances opened inside worktrees (or other projects) would otherwise move the same sessions.
       const ownsRoot = (repoRoot: string) => samePath(repoRoot, here) || samePath(repoRoot, ctx.location.project.directory);
+
+      // The worktree exists at this point, so a launch failure must not fail the create: log and
+      // leave the pane at its shell prompt for the user to start things by hand.
+      const launchSandbox = Effect.fn("herdr-worktrees.launchSandbox")(function* (created: WorktreeCreatedResult) {
+        const worktree = created.worktree.path;
+        const pane = created.root_pane?.pane_id;
+        if (!pane) return yield* Effect.logWarning(`herdr-worktrees: herdr returned no root pane for ${worktree}; not launching the sandbox`);
+        const common = yield* Effect.tryPromise(() => gitCommonDir(worktree));
+        const command = sandboxCommand({ worktree, gitCommonDir: common, sandbox });
+        yield* Effect.tryPromise(() => herdr.request("pane.send_text", { pane_id: pane, text: `${command}\n` }));
+        yield* Effect.logInfo(`herdr-worktrees: launched sandboxed opencode in pane ${pane}: ${command}`);
+      }, Effect.catch((error) => Effect.logWarning(`herdr-worktrees: sandbox launch failed (${errorMessage(unwrap(error))}); the worktree is usable, start opencode manually`)));
 
       const create = Effect.fn("herdr-worktrees.create")(function* (input: { sourceDirectory: string; directory: string; branch?: string }) {
         const workspaces = yield* Effect.tryPromise(() => listWorkspaces(herdr));
@@ -113,6 +146,7 @@ export default Plugin.define({
         const params = toCreateParams(input, source);
         const created = (yield* Effect.tryPromise(() => herdr.request("worktree.create", { ...params, trust_repository: true }, 60_000))) as WorktreeCreatedResult;
         yield* Effect.logInfo(`herdr-worktrees: created ${created.worktree.path} as workspace ${created.workspace.workspace_id}`);
+        if (sandbox.enabled) yield* launchSandbox(created);
         return { directory: created.worktree.path };
       });
 

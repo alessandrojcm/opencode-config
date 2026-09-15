@@ -5,7 +5,10 @@ import {
   isInside,
   parsePorcelain,
   parseResponse,
+  parseSandboxOptions,
   samePath,
+  sandboxCommand,
+  shellQuote,
   splitLines,
   toCreateParams,
   toEntries,
@@ -93,5 +96,34 @@ describe("errors", () => {
     expect(isForceRequired(new HerdrError({ code: "dirty_worktree_requires_force", message: "x" }))).toBe(true);
     expect(isForceRequired(new HerdrError({ code: "other", message: "x" }))).toBe(false);
     expect(isForceRequired(new Error("x"))).toBe(false);
+  });
+});
+
+describe("sandbox", () => {
+  test("parseSandboxOptions defaults when absent or malformed", () => {
+    expect(parseSandboxOptions(undefined)).toEqual({ enabled: false, profile: "opencode-worktree", extraArgs: [], opencodeArgs: [] });
+    expect(parseSandboxOptions({ enabled: "yes", profile: "", extraArgs: "nope" })).toEqual({ enabled: false, profile: "opencode-worktree", extraArgs: [], opencodeArgs: [] });
+  });
+
+  test("parseSandboxOptions keeps valid overrides and drops non-string args", () => {
+    expect(parseSandboxOptions({ enabled: true, profile: "custom", extraArgs: ["--allow", "/x", 3], opencodeArgs: ["--auto"] })).toEqual({
+      enabled: true,
+      profile: "custom",
+      extraArgs: ["--allow", "/x"],
+      opencodeArgs: ["--auto"],
+    });
+  });
+
+  test("shellQuote leaves safe tokens alone and single-quotes the rest", () => {
+    expect(shellQuote("/Users/me/repo-1.2_x")).toBe("/Users/me/repo-1.2_x");
+    expect(shellQuote("/Users/me/my repo")).toBe("'/Users/me/my repo'");
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+  });
+
+  test("sandboxCommand grants the worktree and the git common dir, then runs standalone opencode", () => {
+    const sandbox = { enabled: true, profile: "opencode-worktree", extraArgs: ["--allow", "/tmp/cache"], opencodeArgs: ["--auto"] };
+    expect(sandboxCommand({ worktree: "/w/feature", gitCommonDir: "/w/repo/.git", sandbox })).toBe(
+      "nono run -s --profile opencode-worktree --allow /w/feature --allow /w/repo/.git --workdir /w/feature --allow /tmp/cache -- opencode --standalone --auto /w/feature",
+    );
   });
 });

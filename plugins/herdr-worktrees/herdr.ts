@@ -51,6 +51,8 @@ export interface WorktreeCreatedResult {
   type: "worktree_created";
   workspace: WorkspaceInfo;
   worktree: WorktreeInfo;
+  /** The shell pane herdr opened in the new workspace, sitting at its prompt. */
+  root_pane?: { pane_id: string; cwd?: string | null } | null;
 }
 
 export interface WorktreeRemovedResult {
@@ -150,6 +152,65 @@ export function toCreateParams(
   else params.cwd = input.sourceDirectory;
   if (input.branch) params.base = input.branch;
   return params;
+}
+
+// --- sandbox launch -----------------------------------------------------------------------
+
+export interface SandboxOptions {
+  enabled: boolean;
+  /** nono profile name or path. Defaults to the repo-tracked `opencode-worktree` profile. */
+  profile: string;
+  /** Extra `nono run` flags, e.g. `["--allow", "/some/cache"]`. */
+  extraArgs: string[];
+  /** Extra arguments after `opencode --standalone <worktree>`, e.g. `["--auto"]`. */
+  opencodeArgs: string[];
+}
+
+export const DEFAULT_SANDBOX: SandboxOptions = { enabled: false, profile: "opencode-worktree", extraArgs: [], opencodeArgs: [] };
+
+/** Read `options.sandbox` from the plugin's opencode.json entry; anything malformed falls back to defaults. */
+export function parseSandboxOptions(raw: unknown): SandboxOptions {
+  if (!raw || typeof raw !== "object") return DEFAULT_SANDBOX;
+  const o = raw as Record<string, unknown>;
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  return {
+    enabled: o.enabled === true,
+    profile: typeof o.profile === "string" && o.profile.length > 0 ? o.profile : DEFAULT_SANDBOX.profile,
+    extraArgs: strings(o.extraArgs),
+    opencodeArgs: strings(o.opencodeArgs),
+  };
+}
+
+/** POSIX single-quote so the command survives being typed into an interactive shell. */
+export function shellQuote(arg: string): string {
+  return /^[A-Za-z0-9_./:=@%+-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The command typed into the worktree's herdr pane. A linked worktree's `.git` is a file pointing
+ * into the main repo's `.git`, so that directory must be writable too or commits fail.
+ */
+export function sandboxCommand(input: { worktree: string; gitCommonDir: string; sandbox: SandboxOptions }): string {
+  const args = [
+    "nono",
+    "run",
+    "-s",
+    "--profile",
+    input.sandbox.profile,
+    "--allow",
+    input.worktree,
+    "--allow",
+    input.gitCommonDir,
+    "--workdir",
+    input.worktree,
+    ...input.sandbox.extraArgs,
+    "--",
+    "opencode",
+    "--standalone",
+    ...input.sandbox.opencodeArgs,
+    input.worktree,
+  ];
+  return args.map(shellQuote).join(" ");
 }
 
 export type Entry = { directory: string; type: "root" | "worktree" };

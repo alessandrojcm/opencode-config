@@ -1,0 +1,12 @@
+{
+  "extends": "opencode",
+  "meta": {
+    "name": "opencode-worktree",
+    "version": "0.2.0",
+    "description": "opencode --standalone inside a git worktree. Read-only HOME (and /Users) so OpenCode's ancestor config/instruction discovery can realpath every parent; the pack's deny groups (ssh, aws, shell history, keychains, ...) still apply. Writable paths come from `nono run --allow <worktree> --allow <repo>/.git`."
+  },
+  "allow_parent_of_protected": true,
+  "filesystem": {
+    "read": ["/Users", "$HOME"]
+  }
+}

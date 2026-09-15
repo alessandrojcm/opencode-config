@@ -1,0 +1,35 @@
+id = "cuppari.nono-sandboxes"
+name = "nono sandboxes"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "List nono sandbox sessions (opencode worktree workers) with their herdr workspace, flag orphans, and stop them"
+platforms = ["macos", "linux"]
+
+# Interactive popup: prefix-key or command palette. Escape / q closes.
+[[panes]]
+id = "list"
+title = "nono sandboxes"
+placement = "popup"
+width = "90%"
+height = "70%"
+command = ["bun", "run", "sandboxes.ts", "--interactive"]
+
+# Keybind target: keys.command can only invoke actions, so this one opens the popup above.
+[[actions]]
+id = "open"
+title = "nono sandboxes: open"
+contexts = ["workspace"]
+command = ["bun", "run", "sandboxes.ts", "--open"]
+
+# Non-interactive: writes a summary to the plugin log and a herdr notification.
+[[actions]]
+id = "summary"
+title = "nono sandboxes: summary"
+contexts = ["workspace"]
+command = ["bun", "run", "sandboxes.ts", "--summary"]
+
+[[actions]]
+id = "stop-orphans"
+title = "nono sandboxes: stop orphans"
+contexts = ["workspace"]
+command = ["bun", "run", "sandboxes.ts", "--stop-orphans"]
