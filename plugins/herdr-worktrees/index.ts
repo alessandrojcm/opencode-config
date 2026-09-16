@@ -211,7 +211,7 @@ export default Plugin.define({
             Effect.catch((error) => Effect.logWarning(`herdr-worktrees: could not move ${sessionID} back to ${repoRoot}: ${errorMessage(error)}`)),
           );
         }
-        yield* ctx.worktree.refresh({ location: { directory: here } }).pipe(
+        yield* ctx.worktree.refresh({ projectID: ctx.location.project.id }).pipe(
           Effect.catch((error) => Effect.logWarning(`herdr-worktrees: refresh failed after herdr removed ${directory}: ${errorMessage(error)}`)),
         );
         yield* Effect.logInfo(`herdr-worktrees: herdr removed ${directory}; ${sessions.length} session(s) moved back to ${repoRoot}`);
