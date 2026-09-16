@@ -1,8 +1,9 @@
 /** @jsxImportSource @opentui/solid */
 import { SyntaxStyle, type RGBA, type ScrollBoxRenderable, type ThemeTokenStyle } from "@opentui/core";
 import { Plugin } from "@opencode/plugin/tui";
-import { onCleanup } from "solid-js";
+import { onCleanup, Show } from "solid-js";
 import { defaultRetroExportPath, resolveMarkdownExportPath, writeMarkdownExport } from "./report.ts";
+import { homeDueLabel, parseRetroCommand, promptDueLabel } from "./remind.ts";
 import { SessionRetro, type DueEvent, type PendingSession, type Policy } from "./rpc.ts";
 
 type RunResult = { runID: string; ranAt: number; findings: number; report: string };
@@ -10,6 +11,7 @@ type SettingsResult = { projectDir: string; policy: Policy; idleMinutes: number;
 
 type Choice = "run" | "skip" | "later" | "always" | "never";
 type Route = ReturnType<Plugin.Context["ui"]["router"]["current"]>;
+type ReminderState = { bySession: Record<string, DueEvent> };
 type ReportPageData = {
   title: string;
   report: string;
@@ -18,8 +20,17 @@ type ReportPageData = {
   returnRoute: Route;
 };
 
-const ASK_GRACE_MS = 2_000;
 const REPORT_ROUTE = "session-retro-report";
+
+function DueStatus(props: { context: Plugin.Context; text: string | undefined }) {
+  return (
+    <Show when={props.text}>
+      <box paddingLeft={1} flexShrink={0}>
+        <text fg={props.context.theme.text.subdued}>{props.text}</text>
+      </box>
+    </Show>
+  );
+}
 
 function syntaxRule(scope: string[], foreground: RGBA, style: Omit<ThemeTokenStyle["style"], "foreground"> = {}): ThemeTokenStyle {
   return { scope, style: { foreground, ...style } };
@@ -148,10 +159,9 @@ export default Plugin.define({
   id: "session-retro-tui",
   setup(context) {
     const rpc = context.client.rpc(SessionRetro);
-    const pending = new Map<string, DueEvent>();
-    const toasted = new Set<string>();
-    let askOpenFor: string | undefined;
-    let askTimer: ReturnType<typeof setTimeout> | undefined;
+    const [reminders, updateReminders] = context.storage.memory<ReminderState>("due", {
+      initial: { bySession: {} },
+    });
     const cleanups: Array<() => void> = [];
 
     const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") =>
@@ -182,57 +192,35 @@ export default Plugin.define({
       });
     }
 
-    function showable(): boolean {
-      const route = context.ui.router.current();
-      if (route.type === "home") return true;
-      if (route.type === "session") return context.data.session.status(route.sessionID) === "idle";
-      return true;
+    function remember(due: DueEvent) {
+      updateReminders((draft) => {
+        draft.bySession[due.sessionID] = due;
+      });
     }
 
-    function drain() {
-      if (!showable()) return;
-      const route = context.ui.router.current();
-      for (const [id, due] of pending) {
-        if (!toasted.has(id)) {
-          toasted.add(id);
-          toast(`Retro due for "${due.title}" — /retro to run`, "info");
-        }
-        if (route.type === "session" && route.sessionID === id && askOpenFor === undefined && askTimer === undefined) {
-          askTimer = setTimeout(() => {
-            askTimer = undefined;
-            void ask(id);
-          }, ASK_GRACE_MS);
-        }
-      }
+    function forget(sessionID: string) {
+      updateReminders((draft) => {
+        delete draft.bySession[sessionID];
+      });
     }
 
-    async function ask(id: string) {
-      const due = pending.get(id);
-      if (!due) return;
-      if (context.data.session.status(id) !== "idle") return;
-      const route = context.ui.router.current();
-      if (route.type !== "session" || route.sessionID !== id) return;
+    function pendingIDs(): string[] {
+      return Object.keys(reminders.bySession);
+    }
 
-      askOpenFor = id;
-      let choice: Choice | undefined;
-      try {
-        choice = await context.ui.dialog.select<Choice>({
-          title: `Run a retro on "${due.title}"?`,
-          placeholder: `${due.turns} turns · idle ${due.idleMinutes} min · uses one LLM call`,
-          options: [
-            { title: "Run", value: "run", description: "Analyze this session now" },
-            { title: "Skip", value: "skip", description: "Drop this retro" },
-            { title: "Later", value: "later", description: "Ask again after the next idle period" },
-            { title: "Always for this project", value: "always", description: "Run automatically when idle", category: "Policy" },
-            { title: "Never for this project", value: "never", description: "Stop asking for this project", category: "Policy" },
-          ],
-        });
-      } finally {
-        askOpenFor = undefined;
-      }
-      // A turn starting while the dialog was open already removed it from pending and sent "later".
-      if (!pending.has(id)) return;
-      await act(id, due, choice ?? "later");
+    function replaceReminders(sessions: readonly PendingSession[]) {
+      updateReminders((draft) => {
+        draft.bySession = {};
+        for (const session of sessions) {
+          draft.bySession[session.sessionID] = {
+            sessionID: session.sessionID,
+            title: session.title,
+            projectDir: session.projectDir,
+            turns: session.turns,
+            idleMinutes: 0,
+          };
+        }
+      });
     }
 
     async function runRetro(id: string) {
@@ -259,12 +247,31 @@ export default Plugin.define({
       return undefined;
     }
 
+    async function dueFor(sessionID: string): Promise<DueEvent> {
+      const existing = reminders.bySession[sessionID];
+      if (existing) return existing;
+      // SAFETY: SessionRetro validates the RPC output against its declared settings schema.
+      const settings = (await rpc.settings({ sessionID })) as SettingsResult;
+      return {
+        sessionID,
+        title: sessionID,
+        projectDir: settings.projectDir,
+        turns: 0,
+        idleMinutes: settings.idleMinutes,
+      };
+    }
+
     async function runCommand(input?: string) {
-      const arg = (input ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-      if (arg === "pending") {
+      const command = parseRetroCommand(input);
+      if (command.kind === "unknown") {
+        toast(`Unknown /retro argument "${command.arg}". Use pending, settings, skip, later, always, or never.`, "warning");
+        return;
+      }
+      if (command.kind === "pending") {
         const previous = returnRoute();
         // SAFETY: SessionRetro validates the RPC output against its declared pending schema.
         const raw = (await rpc.pending({})) as { sessions: PendingSession[] };
+        replaceReminders(raw.sessions);
         const message = raw.sessions.length
           ? raw.sessions.map((s) => `• ${s.title} (${s.sessionID})\n  ${s.turns} turns · ${s.projectDir}`).join("\n\n")
           : "No sessions with a pending retro.";
@@ -277,7 +284,7 @@ export default Plugin.define({
         toast("Open a session before running /retro.", "warning");
         return;
       }
-      if (arg === "settings") {
+      if (command.kind === "settings") {
         const previous = returnRoute();
         // SAFETY: SessionRetro validates the RPC output against its declared settings schema.
         const settings = (await rpc.settings({ sessionID })) as SettingsResult;
@@ -289,7 +296,7 @@ export default Plugin.define({
         );
         return;
       }
-      await runRetro(sessionID);
+      await act(sessionID, await dueFor(sessionID), command.kind);
     }
 
     // Keymap layers are Solid-owned: register from a rendered slot rather than setup(),
@@ -306,22 +313,34 @@ export default Plugin.define({
       context.ui.slot({
         append: "app",
         render: () => {
-          context.keymap.layer(() => ({
-            mode: "global",
-            commands: [
-              {
-                id: "session-retro.run",
-                title: "Run session retro",
-                description: "Analyze this session for friction (or use pending/settings).",
-                group: "Session retro",
-                palette: true,
-                slash: { name: "retro", arguments: true },
-                run: (input) => runCommand(input).catch(fail("Retro command")),
-              },
-            ],
-          }));
+          context.keymap.layer(() => {
+            const sessionID = currentSessionID();
+            return {
+              mode: "global",
+              commands: [
+                {
+                  id: "session-retro.run",
+                  title: "Run session retro",
+                  description: "Analyze this session, or use pending/settings/skip/later.",
+                  group: "Session retro",
+                  palette: true,
+                  suggested: Boolean(sessionID && reminders.bySession[sessionID]),
+                  slash: { name: "retro", arguments: true },
+                  run: (input) => runCommand(input).catch(fail("Retro command")),
+                },
+              ],
+            };
+          });
           return null;
         },
+      }),
+      context.ui.slot({
+        append: "prompt.footer.status",
+        render: (input) => <DueStatus context={context} text={promptDueLabel(input.sessionID, pendingIDs())} />,
+      }),
+      context.ui.slot({
+        append: "home.footer.status",
+        render: () => <DueStatus context={context} text={homeDueLabel(pendingIDs().length)} />,
       }),
     );
 
@@ -329,27 +348,38 @@ export default Plugin.define({
       const setPolicy = (policy: Policy) => rpc.policy({ projectDir: due.projectDir, policy });
       switch (choice) {
         case "run":
-          pending.delete(id);
+          forget(id);
           await runRetro(id);
           return;
         case "skip":
-          pending.delete(id);
-          await rpc.skip({ sessionID: id }).catch(fail("Skip"));
+          await rpc
+            .skip({ sessionID: id })
+            .then(() => {
+              forget(id);
+              toast("Skipped this retro.");
+            })
+            .catch(fail("Skip"));
           return;
         case "later":
-          pending.delete(id);
-          toasted.delete(id);
-          await rpc.later({ sessionID: id }).catch(fail("Later"));
+          await rpc
+            .later({ sessionID: id })
+            .then(() => {
+              forget(id);
+              toast("Snoozed until the next idle period.");
+            })
+            .catch(fail("Later"));
           return;
         case "always":
-          pending.delete(id);
+          forget(id);
           await setPolicy("always").catch(fail("Policy"));
           await runRetro(id);
           return;
         case "never":
-          pending.delete(id);
           await setPolicy("never").catch(fail("Policy"));
-          await rpc.skip({ sessionID: id }).catch(fail("Skip"));
+          await rpc
+            .skip({ sessionID: id })
+            .then(() => forget(id))
+            .catch(fail("Skip"));
           return;
       }
     }
@@ -357,31 +387,7 @@ export default Plugin.define({
     cleanups.push(
       rpc.events.on("due", (event) => {
         // SAFETY: SessionRetro validates due event data against its declared event schema.
-        const due = event.data as DueEvent;
-        pending.set(due.sessionID, due);
-        drain();
-      }),
-    );
-
-    for (const type of ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.viewed"] as const) {
-      cleanups.push(context.data.on(type, () => drain()));
-    }
-
-    cleanups.push(
-      context.data.on("session.execution.started", (event) => {
-        const id = event.data.sessionID;
-        if (askTimer !== undefined) {
-          clearTimeout(askTimer);
-          askTimer = undefined;
-        }
-        if (askOpenFor === id) {
-          // Turn started while the dialog is open: close it and treat as Later.
-          const due = pending.get(id);
-          pending.delete(id);
-          toasted.delete(id);
-          context.ui.dialog.clear();
-          if (due) void rpc.later({ sessionID: id }).catch(fail("Later"));
-        }
+        remember(event.data as DueEvent);
       }),
     );
 
@@ -389,18 +395,22 @@ export default Plugin.define({
       .pending({})
       .then((raw) => {
         // SAFETY: SessionRetro validates the RPC output against its declared pending schema.
-        const result = raw as { sessions: PendingSession[] };
-        for (const s of result.sessions) {
-          pending.set(s.sessionID, { sessionID: s.sessionID, title: s.title, projectDir: s.projectDir, turns: s.turns, idleMinutes: 0 });
+        // Merge, don't replace: a due event can arrive after this snapshot was taken.
+        for (const session of (raw as { sessions: PendingSession[] }).sessions) {
+          remember({
+            sessionID: session.sessionID,
+            title: session.title,
+            projectDir: session.projectDir,
+            turns: session.turns,
+            idleMinutes: 0,
+          });
         }
-        drain();
       })
       .catch(() => {
         /* server half not loaded yet; due events will arrive later */
       });
 
     return () => {
-      if (askTimer !== undefined) clearTimeout(askTimer);
       for (const c of cleanups) c();
     };
   },

@@ -92,19 +92,20 @@ RPC (`rpc.ts`):
 methods:
   run     {sessionID}              → {runID, ranAt, findings: number, report} // waits, analyzes, returns Markdown
   skip    {sessionID}              → {}                          // clears pending
-  later   {sessionID}              → {}                          // keeps pending, resets timer
+  later   {sessionID}              → {}                          // clears pending, resets idle timer
   policy  {projectDir, policy: "always"|"never"|"ask"} → {}
   pending {}                       → {sessions: [{sessionID, title, projectDir, turns, dueAt}]}
 events:
   due     {sessionID, title, projectDir, turns, idleMinutes}
 ```
 
-CLI command `/retro [pending|settings]`: default = `run` for the current session
-(resets timer and clears pending). The TUI calls the server RPC and opens a
-scrollable, theme-aware rendered Markdown page in the main content area; it does not post a synthetic
-transcript message or trigger another model turn. On a retro report, `e` prompts
-for a project-relative or absolute path and exports actionable Markdown. Existing
-files require overwrite confirmation.
+CLI command `/retro [pending|settings|skip|later|always|never]`: default = `run`
+for the current session (resets timer and clears pending). The TUI calls the
+server RPC and opens a scrollable, theme-aware rendered Markdown page in the
+main content area; it does not post a synthetic transcript message or trigger
+another model turn. On a retro report, `e` prompts for a project-relative or
+absolute path and exports actionable Markdown. Existing files require overwrite
+confirmation.
 
 Tool `retro_query` (namespace `retro`, codemode on): `{sql}` read-only SELECT
 against retro.db (reject anything not starting with `SELECT`/`WITH`; open the
@@ -116,33 +117,23 @@ tool calls, and rule/LLM findings from SQLite.
 ### TUI half (`tui.tsx`)
 
 ```
-pending: Set<sessionID>     (from retro.due + rpc pending() on connect)
+pending: memory store of due sessions   (from retro.due + rpc pending() on connect)
 
-showable():
-  route = ui.router.current()
-  route.type === "home"  → true
-  route.type === "session" → data.session.status(route.sessionID) === "idle"
-  else → true
+Never open a confirm/select dialog when a retro becomes due. The reminder is a
+persistent footer chip, not a toast or modal:
 
-on retro.due            → pending.add; drain()
-on session.execution.*  → drain()
-on session.viewed       → drain()
+  prompt.footer.status  → "retro due · /retro" when this session is pending
+  home.footer.status    → "N retro(s) due · /retro pending" when any are pending
+  /retro                → suggested in the palette while the current session is due
 
-drain():
-  if !showable() return
-  for id in pending:
-    if not toasted[id]: toast "Retro due for <title> — /retro"; toasted[id]=true
-    if route is session id:  schedule ask(id) after 2s grace
-
-ask(id):
-  if session.status(id) !== "idle" → return (re-ask on next drain)
-  select: Run / Skip / Later / Always for this project / Never for this project
-  Run    → rpc.run;  toast result
-  Skip   → rpc.skip
-  Later  → rpc.later
-  Always → rpc.policy(always); rpc.run
-  Never  → rpc.policy(never);  rpc.skip
-  on session.execution.started for id while dialog open → dialog.clear(), treat as Later
+/retro verbs:
+  (none)   → rpc.run
+  pending  → list pending
+  settings → show policy / idle / db
+  skip     → rpc.skip
+  later    → rpc.later (clears pending, resets idle timer)
+  always   → rpc.policy(always); rpc.run
+  never    → rpc.policy(never); rpc.skip
 ```
 
 No analysis, no sqlite, no LLM in the TUI half.
@@ -268,6 +259,15 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
   The plugin mounts the global `/retro` layer through the `app` slot; calling it
   directly from `setup()` leaves the command unreachable.
 
+## Implementation notes (due reminder, 2026-09-16)
+
+- The idle-due prompt is a footer status chip, not `dialog.select`. A modal
+  after every idle period interrupted composing; the chip stays until
+  `/retro`, `/retro skip`, or `/retro later`.
+- `later` now clears server pending before resetting the idle timer so
+  `session.viewed` cannot immediately re-due a snoozed session. If a turn is
+  already running, it does not start a new timer; `onTurnEnded` will.
+
 ## Out of scope (v1)
 
 - Cross-session dedupe of harness fixes beyond the `v_harness_fixes` view.
@@ -279,7 +279,7 @@ views: v_worst_sessions, v_tool_error_rates, v_friction_by_type, v_harness_fixes
 1. `bunx tsc --noEmit …` over the new files (add to the AGENTS.md command).
 2. Restart opencode; run a short session; confirm `turn`/`tool_call` rows via
    `sqlite3 ~/.local/share/opencode/session-retro.db`.
-3. Set `idleMinutes: 1`, wait, confirm toast then dialog appear only when idle
-   and only on the due session; confirm nothing happens mid-turn.
+3. Set `idleMinutes: 1`, wait, confirm the footer chip appears and no dialog or
+   due-toast interrupts; confirm `/retro skip` and `/retro later` clear it.
 4. `/retro` on a session → `retro_run` + `friction(source=llm)` rows.
 5. `retro_query {sql: "select * from v_harness_fixes"}` from an agent.

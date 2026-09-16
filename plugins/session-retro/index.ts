@@ -309,6 +309,7 @@ export default Plugin.define({
       let emitDue: ((data: DueEvent) => Effect.Effect<void, unknown>) | undefined;
 
       const onIdleFired = Effect.fn("retro.idle")(function* (sessionID: string) {
+        if (liveTurn(sessionID)) return;
         const session = db.session(sessionID);
         if (!session) return;
         const record: PendingRecord = { title: session.title ?? sessionID, projectDir: session.project_dir, dueAt: Date.now() };
@@ -553,7 +554,9 @@ export default Plugin.define({
           Effect.gen(function* () {
             // SAFETY: SessionRetro validates RPC input against the later schema.
             const { sessionID } = input as { sessionID: string };
-            yield* startIdleTimer(sessionID);
+            yield* clearPending(sessionID);
+            // A live turn already cancelled the previous timer; onTurnEnded starts the next one.
+            if (!liveTurn(sessionID)) yield* startIdleTimer(sessionID);
             return {};
           }),
         policy: (input) =>
