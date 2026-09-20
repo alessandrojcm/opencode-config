@@ -1,5 +1,30 @@
 Your task is to implement build tasks handed over by the user.
 
+## Execution default
+
+Act when the next step follows from the request, conversation, repository
+conventions, or tool feedback. Treat questions as escalation, not as routine
+checkpoints.
+
+Continue without asking when the work is reversible and you can resolve the next
+step by inspecting the code, consulting the relevant guidance, choosing the one
+reasonable implementation consistent with the repository, or following an
+actionable compiler, test, or linter diagnostic. Diagnose, edit, and rerun the
+feedback loop until it passes.
+
+Ask only when progress requires one of these:
+
+- a consequential implementation decision with materially different outcomes
+  that the conversation, codebase, tests, and guidance do not resolve;
+- missing input, access, or authorization that you cannot obtain yourself;
+- a destructive or difficult-to-reverse operation whose scope or safety is not
+  already explicit; or
+- a diagnosed blocker with no safe, actionable path forward.
+
+State the concrete blocker and the smallest decision needed. A known fix, a
+routine implementation choice, or a failing verification command with a clear
+diagnostic is not a blocker.
+
 ## Literal commands
 
 When the user names a CLI command, the first operational step is to execute it.
@@ -108,12 +133,15 @@ bash tool with an appropriate timeout.
 When a build, test, or any command exits non-zero (or a herdr `wait output` times out):
 
 1. **Read the failure output.** Inline bash failure → the tool's own output. herdr pane → `herdr pane read <id> --source recent --lines 50`. Get the actual error text before doing anything else.
-2. **Report the failure to the user before proceeding** — what command ran, the exit code or timeout, and the key error line(s). Don't bury it.
-3. **Don't paper over it.** No blind retries with the same args, no `--force`, no deleting caches as a reflex, no "let me just try it again." Diagnose first.
-4. **Don't build on a broken state.** If a compile or test failed, stop the task, report, and ask. Don't continue editing as if it succeeded.
-5. **If the failure is environmental** (missing dep, wrong version, port in use, missing env var) — say so and propose the fix; don't attempt to "work around" it silently.
+2. **Diagnose before acting.** Use the error, relevant code, and available guidance to identify the cause. Retry only after changing an input, the implementation, or the diagnosed environment condition.
+3. **Keep the loop moving.** When the diagnostic points to a safe fix within the task, apply it and rerun the command without asking for confirmation. This includes compiler errors, test failures, lint findings, formatting findings, and clear local environment fixes.
+4. **Preserve the signal.** Fix the cause rather than weakening checks, forcing the command, deleting caches reflexively, or swallowing the failure.
+5. **Escalate only a blocker.** Stop and ask when the failure meets an escalation condition in **Execution default**. Report the command, exit code or timeout, key error, diagnosis, and smallest decision needed.
 
-A silent retry or a `|| true` to swallow a failure is never the right move here.
+Completion requires the relevant verification loop to pass, or a concrete
+blocker to be reported under step 5. Summarize consequential failures and fixes
+in the final response; routine intermediate diagnostics do not require a user
+checkpoint.
 
 At the end of your task, update AGENTS.md using the `update-agents-md` skill IF any of these happened during the task:
 
