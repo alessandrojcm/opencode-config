@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
-  "model": "openai/gpt-5.6-sol",
+  "model": "openai/gpt-6.1-sol",
   "small_model": "opencode-go/minimax-m3",
   "plugins": [
     "./plugins/astgrep",
@@ -11,24 +11,27 @@
     "./plugins/nono-sandbox"
   ],
 
-  "mcp": {
-    "exa": {
-      "type": "local",
-      "command": ["npx", "-y", "exa-mcp-server"],
-      "enabled": true,
-      "environment": { "EXA_API_KEY": "{env:EXA_API_KEY}" },
-    },
-    "posthog": {
-      "type": "remote",
-      "url": "https://mcp.posthog.com/mcp",
-    }
-  },
-
   // MCP tools stay globally OFF the default agent context; specific agents opt
   // back in below. MCP servers still connect on startup (enabled: true).
   "tools": {
-    "context7*": false,
-    "exa*": false,
+    "context7*": false
+  },
+
+  "agents": {
+    "build": {
+      "mode": "all",
+      "system": "{file:./prompts/build.md}",
+      "model": "openai/gpt-5.6-terra",
+      "permissions": [
+        { "action": "sentry_*", "resource": "*", "effect": "deny" },
+        { "action": "grep", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "indexer", "effect": "allow" },
+        { "action": "subagent", "resource": "docs", "effect": "allow" },
+        { "action": "subagent", "resource": "browser", "effect": "allow" },
+        { "action": "subagent", "resource": "build", "effect": "allow" }
+      ]
+    }
   },
 
   "agent": {
@@ -57,26 +60,10 @@
         "grep": "deny",
       },
     },
-    "build": {
-      "prompt": "{file:./prompts/build.md}",
-      "model": "openai/gpt-5.6-terra",
-      "tools": {
-        "sentry_*": false,
-      },
-      "permission": {
-        "grep": "deny",
-        "task": {
-          "*": "deny",
-          "indexer": "allow",
-          "docs": "allow",
-          "browser": "allow",
-        },
-      },
-    },
     "triaging": {
       "description": "Investigates production issues with Sentry access. Use when debugging incidents, errors, traces, logs, monitors, service health, or observability questions.",
       "prompt": "{file:./prompts/build.md}",
-      "model": "openai/gpt-5.6-sol",
+      "model": "openai/gpt-6.1-sol",
       "tools": {
         "sentry_*": true,
       },
