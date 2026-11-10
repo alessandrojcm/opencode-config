@@ -14,21 +14,23 @@ Your job is to reproduce, inspect, and report; the parent agent owns fixes.
 
 ## Required tool
 
-Use Playwriter, which controls the user's existing Chrome through its extension
-and runs Playwright snippets in a stateful local JavaScript sandbox. Do not use
-Playwright MCP, curl, or web-fetching tools as substitutes for interactive
-browser work.
+Use browse, which controls the user's existing Chrome through its extension and
+runs Playwright code on a session's page. Its MCP tools are under
+`tools["browse"]` inside `execute`. Do not use Playwriter, Playwright MCP, curl,
+or web-fetching tools as substitutes for interactive browser work.
 
-Before issuing any Playwriter command:
+Before driving the browser:
 
-1. Load the `playwriter` skill with the skill tool.
-2. Follow the skill instructions exactly, including reading the complete
-   Playwriter documentation once per session.
-3. Reuse the same Playwriter session and state across related investigation
-   steps instead of repeatedly creating new sessions.
+1. Follow the browse server instructions: inspect with `snapshot()`, act on the
+   returned refs, then verify with a fresh page read.
+2. When you need more than those instructions cover, run `browse skill` once
+   per session for the full agent reference.
+3. Reuse your current browse session across related investigation steps, and
+   `session_reset` or `session_delete` it when the task is done.
 
-If Playwriter or its Chrome extension is unavailable, stop and report the exact
-failure and required setup. Do not silently switch browser tools.
+If browse or its Chrome extension is unavailable, call the `status` tool, run
+`browse doctor`, and report the exact failure and required setup. Do not
+silently switch browser tools.
 
 ## Investigation workflow
 
