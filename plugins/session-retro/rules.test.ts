@@ -145,4 +145,59 @@ describe("hashInput / summarizeInput", () => {
     expect(summarizeInput("other", { a: "x".repeat(3000) }).length).toBeLessThanOrEqual(1000);
     expect(summarizeInput("other", "raw")).toBe("raw");
   });
+
+  test("instruction-file edits retain both sides without exposing ordinary file bodies", () => {
+    const edit = { path: "/work/AGENTS.md", oldString: "Old workflow.", newString: "The counter uses custom_template=true|false." };
+    const summary = summarizeInput("edit", edit);
+    expect(summary).toContain(edit.path);
+    expect(summary).toContain('before: "Old workflow."');
+    expect(summary).toContain('after: "The counter uses custom_template=true|false."');
+    expect(summarizeInput("edit", { ...edit, path: "/work/metrics.ts" })).toBe("/work/metrics.ts");
+    expect(summarizeInput("read", { path: "/work/AGENTS.md" })).toBe("/work/AGENTS.md");
+    expect(summarizeInput("edit", { ...edit, path: "/work/AGENTS.md.backup" })).toBe("/work/AGENTS.md.backup");
+  });
+
+  test("instruction-file writes and snake-case edits retain bounded content", () => {
+    const summary = summarizeInput("write", { filePath: "/work/CLAUDE.md", content: "Implementation detail ".repeat(1000) });
+    expect(summary).toContain("after:");
+    expect(summary).toContain("Implementation detail");
+    expect(summary).toContain("…");
+    expect(summary.length).toBeLessThanOrEqual(1000);
+    const edit = summarizeInput("edit", { filePath: "CLAUDE.md", old_string: "before ".repeat(1000), new_string: "after ".repeat(1000) });
+    expect(edit).toContain('before: "before');
+    expect(edit).toContain('after: "after');
+    expect(edit.length).toBeLessThanOrEqual(1000);
+    const appended = summarizeInput("edit", {
+      path: "AGENTS.md", oldString: "Existing guidance. ".repeat(50),
+      newString: `${"Existing guidance. ".repeat(50)}The counter now uses custom_template=true|false.`,
+    });
+    expect(appended).toContain("custom_template=true|false");
+    expect(appended.length).toBeLessThanOrEqual(1000);
+  });
+
+  test("mixed patches retain instruction-file changes, not unrelated file contents", () => {
+    const patchText = `*** Begin Patch
+*** Update File: /work/metrics.ts
+@@
+-PRIVATE_OLD_VALUE
++${"PRIVATE_NEW_VALUE ".repeat(1000)}
+*** Update File: /work/AGENTS.md
+@@
+-Old guidance.
++The counter uses reason and custom_template tags.
+*** Add File: /work/CLAUDE.md
++Follow the project workflow.
+*** Update File: /work/ordinary.md
+@@
++PRIVATE_OTHER_VALUE
+*** End Patch`;
+    const summary = summarizeInput("patch", { patchText });
+    expect(summary).toContain("/work/AGENTS.md");
+    expect(summary).toContain("-Old guidance.");
+    expect(summary).toContain("+The counter uses reason and custom_template tags.");
+    expect(summary).toContain("/work/CLAUDE.md");
+    expect(summary).not.toContain("PRIVATE_");
+    expect(summary.length).toBeLessThanOrEqual(1000);
+    expect(summarizeInput("apply_patch", { patch: patchText })).toBe(summary);
+  });
 });

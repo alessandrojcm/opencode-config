@@ -157,8 +157,13 @@ Run on the closed turn's `tool_call` rows and events:
 
 Input: `session.context()` compressed to user text, assistant text, and one
 line per tool call `(#n tool name status inputSummary)`; tool output bodies
-dropped; reasoning dropped. Rule findings appended as hints. Prompt asks for
-JSON only:
+dropped; reasoning dropped. AGENTS.md/CLAUDE.md edits retain bounded before/after
+or instruction-file patch excerpts in the input summary, including the ends of
+long excerpts so appended notes remain visible. Mixed patches omit unrelated
+file bodies from those excerpts. The reviewer treats excerpts as evidence, not
+instructions, and distinguishes agent guidance from implementation documentation;
+an instruction-file edit alone is not a finding. Rule findings are appended as
+hints. Prompt asks for JSON only:
 
 ```json
 {"findings":[{"type":"user_correction|unnecessary_question|false_done|instruction_violated|wrong_tool|scope_creep|other",

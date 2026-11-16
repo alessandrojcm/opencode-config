@@ -26,7 +26,7 @@ function DueStatus(props: { context: Plugin.Context; text: string | undefined })
   return (
     <Show when={props.text}>
       <box paddingLeft={1} flexShrink={0}>
-        <text fg={props.context.theme.text.subdued}>{props.text}</text>
+        <text fg={props.context.theme.text.muted}>{props.text}</text>
       </box>
     </Show>
   );
@@ -40,8 +40,12 @@ function reportSyntaxStyle(context: Plugin.Context): SyntaxStyle {
   const theme = context.theme;
   const syntax = theme.syntax;
   const markdown = theme.markdown;
-  return SyntaxStyle.fromTheme([
-    syntaxRule(["default"], theme.text.default),
+  // The locally pinned OpenTUI 0.5 types predate the renderer-owned resource API.
+  // OpenCode's newer runtime requires the owner; 0.5 ignores the extra argument.
+  const renderer = context.renderer as typeof context.renderer & { readonly nativeScene: unknown };
+  const fromTheme = SyntaxStyle.fromTheme as (rules: ThemeTokenStyle[], owner: unknown) => SyntaxStyle;
+  return fromTheme([
+    syntaxRule(["default"], theme.text.base),
     syntaxRule(["comment", "comment.documentation"], syntax.comment, { italic: true }),
     syntaxRule(["string", "symbol", "character"], syntax.string),
     syntaxRule(["number", "boolean", "constant", "float"], syntax.number),
@@ -58,10 +62,10 @@ function reportSyntaxStyle(context: Plugin.Context): SyntaxStyle {
     syntaxRule(["markup.list"], markdown.listItem),
     syntaxRule(["markup.quote"], markdown.blockQuote, { italic: true }),
     syntaxRule(["markup.raw", "markup.raw.block"], markdown.code),
-    syntaxRule(["markup.raw.inline"], markdown.code, { background: theme.background.default }),
+    syntaxRule(["markup.raw.inline"], markdown.code, { background: theme.background.base }),
     syntaxRule(["markup.link", "markup.link.url"], markdown.link, { underline: true }),
     syntaxRule(["markup.link.label"], markdown.linkText, { underline: true }),
-  ]);
+  ], renderer.nativeScene);
 }
 
 function ReportPage(props: { context: Plugin.Context; data?: ReportPageData }) {
@@ -70,7 +74,7 @@ function ReportPage(props: { context: Plugin.Context; data?: ReportPageData }) {
   const syntaxStyle = reportSyntaxStyle(props.context);
   let scroll: ScrollBoxRenderable | undefined;
 
-  onCleanup(() => syntaxStyle.destroy());
+  onCleanup(() => void props.context.renderer.idle().then(() => syntaxStyle.destroy()));
 
   const close = () => props.context.ui.router.navigate(data?.returnRoute ?? { type: "home" });
   const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") =>
@@ -116,11 +120,11 @@ function ReportPage(props: { context: Plugin.Context; data?: ReportPageData }) {
   }));
 
   return (
-    <box width="100%" height="100%" minHeight={0} flexDirection="column" backgroundColor={theme.background.default}>
+    <box width="100%" height="100%" minHeight={0} flexDirection="column" backgroundColor={theme.background.base}>
       <box flexShrink={0} paddingTop={1} paddingBottom={1} paddingLeft={2} paddingRight={2} flexDirection="row">
-        <text fg={theme.text.default}>{data?.title ?? "Session retro"}</text>
+        <text fg={theme.text.base}>{data?.title ?? "Session retro"}</text>
         <box flexGrow={1} />
-        <text fg={theme.text.subdued}>{data?.exportPath ? "e export · esc back" : "esc back"}</text>
+        <text fg={theme.text.muted}>{data?.exportPath ? "e export · esc back" : "esc back"}</text>
       </box>
       <scrollbox
         ref={(element: ScrollBoxRenderable) => (scroll = element)}
@@ -142,12 +146,12 @@ function ReportPage(props: { context: Plugin.Context; data?: ReportPageData }) {
             tableOptions={{ style: "grid", cellPaddingX: 1 }}
             conceal={true}
             fg={theme.markdown.text}
-            bg={theme.background.default}
+            bg={theme.background.base}
           />
         </box>
       </scrollbox>
       <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-        <text fg={theme.text.subdued}>
+        <text fg={theme.text.muted}>
           ↑/↓ or j/k scroll · pgup/pgdn page · home/end jump{data?.exportPath ? " · e export" : ""} · esc back
         </text>
       </box>

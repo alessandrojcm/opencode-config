@@ -165,6 +165,41 @@ const SUMMARY_KEYS = ["command", "path", "filePath", "file", "pattern", "query",
 // Long enough that shell_for_search sees the whole command in almost every case.
 const MAX_SUMMARY = 1000;
 
+function excerpt(text: string, max: number, keepEnd = false): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  if (!keepEnd) return `${compact.slice(0, max - 1)}…`;
+  const head = Math.ceil((max - 1) / 2);
+  return `${compact.slice(0, head)}…${compact.slice(-(max - 1 - head))}`;
+}
+
+function isInstructionFile(path: string): boolean {
+  return /(?:^|[/\\])(?:AGENTS|CLAUDE)\.md$/i.test(path.trim());
+}
+
+function instructionEditSummary(input: { readonly [key: string]: JsonValue }): string | undefined {
+  const path = [input.path, input.filePath, input.file].find(isString);
+  if (path && isInstructionFile(path)) {
+    const before = [input.oldString, input.old_string].find(isString);
+    const after = [input.newString, input.new_string, input.content].find(isString);
+    if (before !== undefined || after !== undefined) {
+      const parts = [excerpt(path, 200)];
+      if (before !== undefined) parts.push(`before: ${excerpt(JSON.stringify(before), 350, true)}`);
+      if (after !== undefined) parts.push(`after: ${excerpt(JSON.stringify(after), 350, true)}`);
+      return parts.join(" · ");
+    }
+  }
+
+  const patch = [input.patchText, input.patch].find(isString);
+  if (patch === undefined) return undefined;
+  const sections = patch.split(/(?=^\*\*\* (?:Add|Update|Delete) File: )/m).filter((section) => {
+    const path = section.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/m)?.[1];
+    return path !== undefined && isInstructionFile(path);
+  });
+  if (sections.length === 0) return undefined;
+  return `instruction-file patch excerpt: ${excerpt(sections.join("\n").replace(/^\*\*\* End Patch\s*$/m, ""), 900, true)}`;
+}
+
 export function summarizeInput(_tool: string, input: JsonValue): string {
   let text: string;
   if (isString(input)) {
@@ -172,9 +207,8 @@ export function summarizeInput(_tool: string, input: JsonValue): string {
   } else if (isJsonRecord(input)) {
     // SAFETY: input is a JsonValue object after excluding strings, and every property is therefore JsonValue.
     const record = input as { readonly [key: string]: JsonValue };
-    const candidate = SUMMARY_KEYS.map((key) => record[key]).find(isString);
+    const candidate = instructionEditSummary(record) ?? SUMMARY_KEYS.map((key) => record[key]).find(isString);
     text = candidate ?? JSON.stringify(input);
   } else text = String(input);
-  text = text.replace(/\s+/g, " ").trim();
-  return text.length > MAX_SUMMARY ? `${text.slice(0, MAX_SUMMARY - 1)}…` : text;
+  return excerpt(text, MAX_SUMMARY);
 }

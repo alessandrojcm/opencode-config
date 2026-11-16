@@ -47,4 +47,4 @@ Dev servers, watchers, REPLs, and long jobs you need to watch go in a herdr pane
 
 ## AGENTS.md
 
-At the end of a task, record in AGENTS.md (via the `update-agents-md` skill) only what a future agent would otherwise get wrong: a new dependency or command, a changed workflow, a non-obvious convention, or agent config you edited. Write one concrete note, not a log. As a subagent, pass such notes to your parent instead.
+AGENTS.md contains durable guidance for how agents work in this repository, not a record of what was implemented. Leave it unchanged unless correcting existing guidance or recording a verified, recurring pitfall that ordinary repository sources would not reveal. Use `update-agents-md` only after identifying such a change. Put implementation details in their owning code or documentation. Subagents report candidate guidance changes to their parent instead of editing AGENTS.md.
